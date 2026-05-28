@@ -1467,6 +1467,13 @@
   box-shadow: 0 12px 26px rgba(37, 99, 235, 0.3);
 }
 
+.primary-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 .ghost-button {
   padding: 10px 16px;
   border-radius: 12px;
@@ -2254,6 +2261,90 @@
 }
 
 /* ------------------------ Charts ------------------------ */
+
+.chart-type-picker {
+  position: relative;
+  display: inline-flex;
+}
+
+.chart-type-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--surface-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, transform 120ms ease;
+}
+
+.chart-type-trigger:hover {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: var(--card-bg);
+}
+
+.chart-type-trigger:focus-visible {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+.chart-type-trigger[aria-expanded='true'] {
+  border-color: rgba(37, 99, 235, 0.55);
+  background: var(--card-bg);
+}
+
+.chart-type-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  min-width: 160px;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.18);
+  animation: chartTypeMenuIn 140ms ease;
+}
+
+@keyframes chartTypeMenuIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.chart-type-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 0.86rem;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.chart-type-option:hover {
+  background: var(--surface-bg);
+  color: var(--accent-text);
+}
+
+.chart-type-option.is-active {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent-text);
+}
 
 .chart-shell {
   width: 100%;
@@ -3738,6 +3829,41 @@
   transition: border-color 160ms, box-shadow 160ms;
 }
 
+.login-password-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.login-password-wrap input {
+  width: 100%;
+  padding-right: 42px;
+}
+
+.password-toggle-btn {
+  position: absolute;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.password-toggle-btn:hover {
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--text-primary);
+}
+
+.password-toggle-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
 .login-field input:focus {
   outline: none;
   border-color: #2563eb;
@@ -3782,17 +3908,175 @@
   cursor: not-allowed;
 }
 
-.login-hint {
-  background: var(--surface-bg);
+.login-info {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.32);
   border-radius: 10px;
   padding: 10px 14px;
-  font-size: 0.83rem;
-  color: var(--text-secondary);
-  display: grid;
-  gap: 3px;
+  color: #047857;
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
-.login-hint strong {
+:root[data-theme='dark'] .login-info {
+  color: #6ee7b7;
+}
+
+.login-secondary-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.login-link {
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent-text);
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 140ms ease;
+}
+
+.login-link:hover {
+  background: rgba(37, 99, 235, 0.08);
+  text-decoration: underline;
+}
+
+.inline-success,
+.inline-error {
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.inline-success.full,
+.inline-error.full {
+  grid-column: 1 / -1;
+}
+
+.inline-success {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.32);
+  color: #047857;
+}
+
+:root[data-theme='dark'] .inline-success {
+  color: #6ee7b7;
+}
+
+.inline-error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #b91c1c;
+}
+
+:root[data-theme='dark'] .inline-error {
+  color: #fca5a5;
+}
+
+.session-history {
+  display: grid;
+  gap: 10px;
+}
+
+.session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--surface-bg);
+}
+
+.session-row strong {
+  color: var(--heading-text);
+  font-size: 0.92rem;
+}
+
+.session-row p {
+  margin-top: 2px;
+}
+
+.session-row.session-failure {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.session-row.session-success {
+  border-color: rgba(16, 185, 129, 0.32);
+}
+
+/* Toast notifications */
+.toast-stack {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  display: grid;
+  gap: 10px;
+  z-index: 1000;
+  max-width: 360px;
+  pointer-events: none;
+}
+
+.toast {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-left-width: 4px;
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 14px 38px rgba(15, 23, 42, 0.18);
+  pointer-events: auto;
+  animation: toastIn 220ms ease;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.toast.toast-info { border-left-color: #2563eb; }
+.toast.toast-success { border-left-color: #10b981; }
+.toast.toast-warn { border-left-color: #f59e0b; }
+.toast.toast-error { border-left-color: #ef4444; }
+
+.toast strong {
+  display: block;
+  color: var(--heading-text);
+  font-size: 0.92rem;
+}
+
+.toast p {
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
+.toast-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+}
+
+.toast-dismiss:hover {
+  background: var(--surface-bg);
   color: var(--text-primary);
 }
 

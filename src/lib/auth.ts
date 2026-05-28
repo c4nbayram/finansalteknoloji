@@ -1,17 +1,7 @@
-export type UserRole = 'admin' | 'user'
+﻿import type { Session } from '@supabase/supabase-js'
+import { supabase } from './supabase'
 
-export type AuthUser = {
-  id: string
-  username: string
-  passwordHash: string
-  role: UserRole
-  name: string
-  email: string
-  avatar: string
-  photoData?: string
-  createdAt: string
-  lastLoginAt: string | null
-}
+export type UserRole = 'admin' | 'user'
 
 export type SessionUser = {
   id: string
@@ -25,178 +15,502 @@ export type SessionUser = {
   lastLoginAt: string | null
 }
 
-const USERS_KEY = 'fintech-users-v2'
-const SESSION_KEY = 'fintech-session-v2'
+export type AuthUser = SessionUser
 
-function simpleHash(str: string): string {
-  let h = 5381
-  for (let i = 0; i < str.length; i++) {
-    h = (((h << 5) + h) ^ str.charCodeAt(i)) >>> 0
-  }
-  return h.toString(36)
+export type LoginHistoryEntry = {
+  id: string
+  userId: string
+  username: string
+  at: string
+  outcome: 'success' | 'failure'
+  reason?: string
+  userAgent?: string
 }
 
-function makeId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+type ProfileRow = {
+  id: string
+  username: string
+  email: string | null
+  name: string | null
+  role: UserRole
+  avatar: string | null
+  photo_url: string | null
+  bio: string | null
+  preferred_currency: string | null
+  created_at: string
+  last_login_at: string | null
 }
 
-function seedUsers(): AuthUser[] {
-  return [
-    {
-      id: 'admin-001',
-      username: 'admin',
-      passwordHash: simpleHash('admin123'),
-      role: 'admin',
-      name: 'Sistem Admini',
-      email: 'admin@fintech.local',
-      avatar: 'SA',
-      createdAt: new Date(Date.now() - 30 * 86_400_000).toISOString(),
-      lastLoginAt: null,
-    },
-    {
-      id: 'user-001',
-      username: 'demo',
-      passwordHash: simpleHash('demo123'),
-      role: 'user',
-      name: 'Demo Yatırımcı',
-      email: 'demo@fintech.local',
-      avatar: 'DY',
-      createdAt: new Date(Date.now() - 14 * 86_400_000).toISOString(),
-      lastLoginAt: null,
-    },
-  ]
-}
+let cachedSessionUser: SessionUser | null = null
+let lastLoginErrorMessage = ''
 
-export function getUsers(): AuthUser[] {
-  try {
-    const raw = localStorage.getItem(USERS_KEY)
-    if (!raw) {
-      const defaults = seedUsers()
-      localStorage.setItem(USERS_KEY, JSON.stringify(defaults))
-      return defaults
-    }
-    return JSON.parse(raw) as AuthUser[]
-  } catch {
-    return seedUsers()
-  }
-}
-
-function saveUsers(users: AuthUser[]): void {
-  try {
-    localStorage.setItem(USERS_KEY, JSON.stringify(users))
-  } catch {
-    // ignore quota exceeded
-  }
-}
-
-function toSession(user: AuthUser): SessionUser {
+function rowToSessionUser(row: ProfileRow): SessionUser {
   return {
-    id: user.id,
-    username: user.username,
-    role: user.role,
-    name: user.name,
-    email: user.email,
-    avatar: user.avatar,
-    photoData: user.photoData,
-    createdAt: user.createdAt,
-    lastLoginAt: user.lastLoginAt,
+    id: row.id,
+    username: row.username,
+    role: row.role ?? 'user',
+    name: row.name ?? row.username,
+    email: row.email ?? '',
+    avatar: row.avatar ?? (row.username ?? 'U').slice(0, 2).toUpperCase(),
+    photoData: row.photo_url ?? undefined,
+    createdAt: row.created_at,
+    lastLoginAt: row.last_login_at,
   }
 }
 
-export function login(username: string, password: string): SessionUser | null {
-  const users = getUsers()
-  const hash = simpleHash(password)
-  const user = users.find((u) => u.username === username && u.passwordHash === hash)
-  if (!user) return null
-  const now = new Date().toISOString()
-  saveUsers(users.map((u) => (u.id === user.id ? { ...u, lastLoginAt: now } : u)))
-  const session = { ...toSession(user), lastLoginAt: now }
+async function fetchProfile(userId: string): Promise<SessionUser | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle<ProfileRow>()
+  if (error || !data) return null
+  return rowToSessionUser(data)
+}
+
+function buildFallbackSessionUser(input: {
+  id: string
+  username: string
+  name: string
+  email: string
+}): SessionUser {
+  const cleanUsername = input.username.trim() || 'kullanici'
+  const cleanName = input.name.trim() || cleanUsername
+  return {
+    id: input.id,
+    username: cleanUsername,
+    role: 'user',
+    name: cleanName,
+    email: input.email.trim(),
+    avatar: cleanUsername.slice(0, 2).toUpperCase(),
+    createdAt: new Date().toISOString(),
+    lastLoginAt: null,
+  }
+}
+
+async function ensureProfileRow(input: {
+  userId: string
+  username: string
+  name: string
+  email: string
+}): Promise<void> {
+  const cleanEmail = input.email.trim()
+  const fallbackFromEmail = cleanEmail.includes('@') ? cleanEmail.split('@')[0] : ''
+  const cleanUsername =
+    input.username.trim() || fallbackFromEmail || `user_${input.userId.slice(0, 8)}`
+  const cleanName = input.name.trim() || cleanUsername
+  await supabase.from('profiles').upsert(
+    {
+      id: input.userId,
+      username: cleanUsername,
+      name: cleanName,
+      email: cleanEmail || null,
+      avatar: cleanUsername.slice(0, 2).toUpperCase(),
+    },
+    { onConflict: 'id' },
+  )
+}
+
+async function resolveEmailFromIdentifier(identifier: string): Promise<string | null> {
+  const id = identifier.trim()
+  if (id.includes('@')) return id
+  const { data, error } = await supabase.rpc('get_email_by_username', {
+    p_username: id,
+  })
+  if (!error && data && typeof data === 'string') {
+    return data
+  }
+  const { data: profileRow, error: profileError } = await supabase
+    .from('profiles')
+    .select('email')
+    .ilike('username', id)
+    .not('email', 'is', null)
+    .maybeSingle<{ email: string | null }>()
+  if (profileError || !profileRow?.email) return null
+  return profileRow.email
+}
+
+async function recordLoginHistory(
+  userId: string | null,
+  username: string,
+  outcome: 'success' | 'failure',
+  reason?: string,
+): Promise<void> {
   try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session))
+    await supabase.from('login_history').insert({
+      user_id: userId,
+      username,
+      outcome,
+      reason: reason ?? null,
+      user_agent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
+    })
   } catch {
     // ignore
   }
-  return session
 }
 
-export function logout(): void {
-  localStorage.removeItem(SESSION_KEY)
+// Session
+
+export async function refreshSessionUser(): Promise<SessionUser | null> {
+  const { data } = await supabase.auth.getSession()
+  if (!data.session) {
+    cachedSessionUser = null
+    return null
+  }
+  let profile = await fetchProfile(data.session.user.id)
+  if (!profile) {
+    const meta = data.session.user.user_metadata as Record<string, unknown> | null
+    const email = data.session.user.email ?? ''
+    const usernameFromMeta = typeof meta?.username === 'string' ? meta.username : ''
+    const nameFromMeta = typeof meta?.name === 'string' ? meta.name : ''
+    const usernameFallback =
+      usernameFromMeta || (email.includes('@') ? email.split('@')[0] : `user_${data.session.user.id.slice(0, 8)}`)
+    await ensureProfileRow({
+      userId: data.session.user.id,
+      username: usernameFallback,
+      name: nameFromMeta || usernameFallback,
+      email,
+    })
+    profile = await fetchProfile(data.session.user.id)
+  }
+  if (!profile) {
+    const email = data.session.user.email ?? ''
+    const usernameFallback = email.includes('@') ? email.split('@')[0] : `user_${data.session.user.id.slice(0, 8)}`
+    profile = buildFallbackSessionUser({
+      id: data.session.user.id,
+      username: usernameFallback,
+      name: usernameFallback,
+      email,
+    })
+  }
+  cachedSessionUser = profile
+  return profile
 }
 
 export function getSession(): SessionUser | null {
-  try {
-    const raw = localStorage.getItem(SESSION_KEY)
-    return raw ? (JSON.parse(raw) as SessionUser) : null
-  } catch {
+  return cachedSessionUser
+}
+
+export function getLastLoginError(): string {
+  return lastLoginErrorMessage
+}
+
+export function onAuthChange(cb: (session: Session | null) => void) {
+  const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+    cb(session)
+  })
+  return () => data.subscription.unsubscribe()
+}
+
+// Login / Register / Logout
+
+export async function login(
+  identifier: string,
+  password: string,
+): Promise<SessionUser | null> {
+  lastLoginErrorMessage = ''
+  const email = await resolveEmailFromIdentifier(identifier)
+  if (!email) {
+    lastLoginErrorMessage = 'Kullanıcı adı bulunamadı. E-posta ile giriş yapmayı dene.'
+    await recordLoginHistory(null, identifier, 'failure', 'unknown_username')
     return null
   }
-}
-
-export function updateSession(session: SessionUser): void {
-  try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session))
-  } catch {
-    // ignore
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+  if (error || !data.user) {
+    if (error?.message?.toLowerCase().includes('email not confirmed')) {
+      lastLoginErrorMessage = 'E-posta doğrulaması yapılmamış. Supabase Auth ayarından doğrulamayı kapat veya kullanıcıyı doğrula.'
+    } else {
+      lastLoginErrorMessage = 'Kullanıcı adı/e-posta veya şifre hatalı.'
+    }
+    await recordLoginHistory(null, identifier, 'failure', error?.message ?? 'invalid_credentials')
+    return null
   }
+  let profile = await fetchProfile(data.user.id)
+  if (!profile) {
+    const meta = data.user.user_metadata as Record<string, unknown> | null
+    const usernameFromMeta = typeof meta?.username === 'string' ? meta.username : ''
+    const nameFromMeta = typeof meta?.name === 'string' ? meta.name : ''
+    const usernameFallback =
+      usernameFromMeta || (identifier.includes('@') ? identifier.split('@')[0] : identifier)
+    await ensureProfileRow({
+      userId: data.user.id,
+      username: usernameFallback,
+      name: nameFromMeta || usernameFallback,
+      email: data.user.email ?? email,
+    })
+    profile = await fetchProfile(data.user.id)
+  }
+  if (!profile) {
+    profile = buildFallbackSessionUser({
+      id: data.user.id,
+      username: identifier.includes('@') ? identifier.split('@')[0] : identifier,
+      name: identifier.includes('@') ? identifier.split('@')[0] : identifier,
+      email: data.user.email ?? email,
+    })
+  }
+  // Update last_login_at
+  await supabase
+    .from('profiles')
+    .update({ last_login_at: new Date().toISOString() })
+    .eq('id', data.user.id)
+  await recordLoginHistory(data.user.id, profile.username, 'success')
+  cachedSessionUser = { ...profile, lastLoginAt: new Date().toISOString() }
+  return cachedSessionUser
 }
 
-export function register(
+export async function logout(): Promise<void> {
+  await supabase.auth.signOut()
+  cachedSessionUser = null
+}
+
+export async function register(
   username: string,
   password: string,
   name: string,
   email: string,
-): { user: SessionUser } | { error: string } {
-  const users = getUsers()
-  if (users.some((u) => u.username === username)) {
-    return { error: 'Bu kullanıcı adı zaten kullanılıyor.' }
+): Promise<{ user: SessionUser } | { error: string }> {
+  const cleanUsername = username.trim()
+  const cleanEmail = email.trim()
+  const cleanName = name.trim() || cleanUsername
+  if (!cleanUsername) return { error: 'Kullanıcı adı gereklidir.' }
+  if (!cleanEmail || !cleanEmail.includes('@')) return { error: 'Geçerli bir e-posta gir.' }
+  if (password.length < 6) return { error: 'Şifre en az 6 karakter olmalıdır.' }
+
+  const { data, error } = await supabase.auth.signUp({
+    email: cleanEmail,
+    password,
+    options: {
+      data: {
+        username: cleanUsername,
+        name: cleanName,
+      },
+    },
+  })
+  if (error) {
+    if (error.message.toLowerCase().includes('already')) {
+      return { error: 'Bu e-posta ile bir hesap zaten var.' }
+    }
+    return { error: error.message }
   }
-  if (password.length < 6) {
-    return { error: 'Şifre en az 6 karakter olmalıdır.' }
+  if (!data.user) {
+    return { error: 'Kayıt tamamlanamadı.' }
   }
-  const now = new Date().toISOString()
-  const newUser: AuthUser = {
-    id: makeId(),
-    username,
-    passwordHash: simpleHash(password),
-    role: 'user',
-    name: name.trim() || username,
-    email,
-    avatar: (name.trim() || username).slice(0, 2).toUpperCase(),
-    createdAt: now,
-    lastLoginAt: now,
+
+  await ensureProfileRow({
+    userId: data.user.id,
+    username: cleanUsername,
+    name: cleanName,
+    email: cleanEmail,
+  })
+
+  let profile: SessionUser | null = null
+  for (let i = 0; i < 8 && !profile; i++) {
+    profile = await fetchProfile(data.user.id)
+    if (!profile) await new Promise((r) => setTimeout(r, 250))
   }
-  saveUsers([...users, newUser])
-  const session = toSession(newUser)
-  try {
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session))
-  } catch {
-    // ignore
+  if (!profile) {
+    if (!data.session) {
+      return {
+        user: buildFallbackSessionUser({
+          id: data.user.id,
+          username: cleanUsername,
+          name: cleanName,
+          email: cleanEmail,
+        }),
+      }
+    }
+    return { error: 'Profil oluşturulamadı. Lütfen tekrar dene.' }
   }
-  return { user: session }
+  cachedSessionUser = profile
+  return { user: profile }
 }
 
-export function updateUserProfile(
-  userId: string,
-  updates: Partial<Pick<AuthUser, 'name' | 'email' | 'avatar' | 'photoData'>>,
-): void {
-  const users = getUsers()
-  saveUsers(users.map((u) => (u.id === userId ? { ...u, ...updates } : u)))
-  const session = getSession()
-  if (session?.id === userId) {
-    updateSession({ ...session, ...updates })
-  }
-}
+// Password (change / reset)
 
-export function deleteUser(userId: string): void {
-  const users = getUsers()
-  saveUsers(users.filter((u) => u.id !== userId))
-}
-
-export function changePassword(userId: string, oldPassword: string, newPassword: string): boolean {
-  const users = getUsers()
-  const user = users.find((u) => u.id === userId)
-  if (!user || user.passwordHash !== simpleHash(oldPassword)) return false
+export async function changePassword(
+  _userId: string,
+  oldPassword: string,
+  newPassword: string,
+): Promise<boolean> {
   if (newPassword.length < 6) return false
-  saveUsers(users.map((u) => (u.id === userId ? { ...u, passwordHash: simpleHash(newPassword) } : u)))
-  return true
+  const session = getSession()
+  if (!session) return false
+  // Verify old password by re-authenticating
+  const { error: signInError } = await supabase.auth.signInWithPassword({
+    email: session.email,
+    password: oldPassword,
+  })
+  if (signInError) return false
+  const { error } = await supabase.auth.updateUser({ password: newPassword })
+  return !error
 }
+
+export async function requestPasswordReset(
+  identifier: string,
+): Promise<{ ok: true } | { error: string }> {
+  const email = await resolveEmailFromIdentifier(identifier)
+  if (!email) {
+    return { error: 'Bu kullanıcı adı veya e-postaya sahip bir hesap bulunamadı.' }
+  }
+  const redirectTo =
+    typeof window !== 'undefined' ? `${window.location.origin}/sifre-sifirla` : undefined
+  const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo })
+  if (error) return { error: error.message }
+  return { ok: true }
+}
+
+export async function confirmPasswordResetSession(
+  newPassword: string,
+): Promise<{ ok: true } | { error: string }> {
+  if (newPassword.length < 6) return { error: 'Şifre en az 6 karakter olmalıdır.' }
+  const { error } = await supabase.auth.updateUser({ password: newPassword })
+  if (error) return { error: error.message }
+  return { ok: true }
+}
+
+// Profile updates
+
+export async function updateUserProfile(
+  userId: string,
+  updates: Partial<{
+    name: string
+    email: string
+    avatar: string
+    photoData: string
+    bio: string
+    preferred_currency: string
+  }>,
+): Promise<void> {
+  const row: Record<string, unknown> = {}
+  if (updates.name !== undefined) row.name = updates.name
+  if (updates.email !== undefined) row.email = updates.email
+  if (updates.avatar !== undefined) row.avatar = updates.avatar
+  if (updates.photoData !== undefined) row.photo_url = updates.photoData
+  if (updates.bio !== undefined) row.bio = updates.bio
+  if (updates.preferred_currency !== undefined) row.preferred_currency = updates.preferred_currency
+  if (Object.keys(row).length === 0) return
+  await supabase.from('profiles').update(row).eq('id', userId)
+  if (cachedSessionUser?.id === userId) {
+    cachedSessionUser = { ...cachedSessionUser, ...rowApplyToSession(row) }
+  }
+}
+
+function rowApplyToSession(row: Record<string, unknown>): Partial<SessionUser> {
+  const out: Partial<SessionUser> = {}
+  if (typeof row.name === 'string') out.name = row.name
+  if (typeof row.email === 'string') out.email = row.email
+  if (typeof row.avatar === 'string') out.avatar = row.avatar
+  if (typeof row.photo_url === 'string') out.photoData = row.photo_url
+  return out
+}
+
+export function updateSession(session: SessionUser): void {
+  cachedSessionUser = session
+}
+
+// Admin: users
+
+export async function getUsers(): Promise<AuthUser[]> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .order('created_at', { ascending: false })
+  if (error || !data) return []
+  return (data as ProfileRow[]).map(rowToSessionUser)
+}
+
+export async function deleteUser(userId: string): Promise<void> {
+  // Removes the profile row; auth.users is removed via cascade only if admin
+  // service-role is used. With anon-key this just clears the profile.
+  await supabase.from('profiles').delete().eq('id', userId)
+}
+
+export async function adminResetPassword(
+  _userId: string,
+  _newPassword: string,
+): Promise<boolean> {
+  // Frontend with anon key cannot directly reset another user's password
+  // without service-role access. Use Supabase Edge Function or Admin API.
+  console.warn(
+    '[auth] adminResetPassword: bu işlem için Supabase Edge Function gerekiyor (service-role).',
+  )
+  return false
+}
+
+export async function adminCreateUser(input: {
+  username: string
+  password: string
+  name: string
+  email: string
+  role?: UserRole
+}): Promise<{ user: AuthUser } | { error: string }> {
+  // Admin-created accounts: signUp with the new user's email. The currently
+  // logged-in admin will be signed out by signUp(), so we save+restore session.
+  const { data: currentSession } = await supabase.auth.getSession()
+  const result = await register(input.username, input.password, input.name, input.email)
+  if ('error' in result) {
+    if (currentSession.session) {
+      await supabase.auth.setSession({
+        access_token: currentSession.session.access_token,
+        refresh_token: currentSession.session.refresh_token,
+      })
+    }
+    return result
+  }
+  if (input.role === 'admin') {
+    await supabase.from('profiles').update({ role: 'admin' }).eq('id', result.user.id)
+  }
+  // Restore the admin session
+  if (currentSession.session) {
+    await supabase.auth.setSession({
+      access_token: currentSession.session.access_token,
+      refresh_token: currentSession.session.refresh_token,
+    })
+    const restored = await fetchProfile(currentSession.session.user.id)
+    if (restored) cachedSessionUser = restored
+  }
+  return { user: { ...result.user, role: input.role ?? 'user' } }
+}
+
+// Login history
+
+export async function getLoginHistoryForUser(
+  userId: string,
+): Promise<LoginHistoryEntry[]> {
+  const { data, error } = await supabase
+    .from('login_history')
+    .select('*')
+    .eq('user_id', userId)
+    .order('at', { ascending: false })
+    .limit(50)
+  if (error || !data) return []
+  return data.map((r: Record<string, unknown>) => ({
+    id: String(r.id),
+    userId: String(r.user_id ?? ''),
+    username: String(r.username ?? ''),
+    at: String(r.at),
+    outcome: r.outcome as 'success' | 'failure',
+    reason: r.reason as string | undefined,
+    userAgent: r.user_agent as string | undefined,
+  }))
+}
+
+export async function getAllLoginHistory(): Promise<LoginHistoryEntry[]> {
+  const { data, error } = await supabase
+    .from('login_history')
+    .select('*')
+    .order('at', { ascending: false })
+    .limit(200)
+  if (error || !data) return []
+  return data.map((r: Record<string, unknown>) => ({
+    id: String(r.id),
+    userId: String(r.user_id ?? ''),
+    username: String(r.username ?? ''),
+    at: String(r.at),
+    outcome: r.outcome as 'success' | 'failure',
+    reason: r.reason as string | undefined,
+    userAgent: r.user_agent as string | undefined,
+  }))
+}
+
+

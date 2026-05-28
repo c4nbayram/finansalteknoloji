@@ -18,6 +18,7 @@ import {
   ChevronDown,
   ChevronRight,
   Eye,
+  EyeOff,
   LayoutDashboard,
   Plus,
   Save,
@@ -79,12 +80,41 @@ import {
 import { integrationConfig } from './lib/integrations'
 import {
   getSession,
+  getLastLoginError,
+  getLoginHistoryForUser,
   login,
   logout as authLogout,
   register,
   updateUserProfile,
+  changePassword,
+  requestPasswordReset,
+  refreshSessionUser,
+  onAuthChange,
   type SessionUser,
+  type LoginHistoryEntry,
 } from './lib/auth'
+import { supabase } from './lib/supabase'
+import {
+  fetchWatchlist,
+  addWatchlistItem,
+  removeWatchlistItem,
+  fetchPositions,
+  upsertPosition,
+  removePosition,
+  fetchNotes,
+  addNote as dbAddNote,
+  deleteNote as dbDeleteNote,
+  fetchAlerts,
+  addAlert as dbAddAlert,
+  deleteAlert as dbDeleteAlert,
+  fetchBotConfig,
+  saveBotConfig,
+  fetchBotState,
+  saveBotState,
+  recordBotTrade,
+  fetchProfileExtras,
+  uploadProfilePhoto,
+} from './lib/db'
 import { addLog } from './lib/logger'
 import {
   appendEquityPoint,
@@ -149,15 +179,8 @@ type PriceAlert = {
 
 type ChartType = 'candle' | 'line' | 'area'
 
-const PROFILE_STORAGE_KEY = 'fintech-profile-v1'
-const WATCHLIST_STORAGE_KEY = 'fintech-watchlist-v1'
 const THEME_STORAGE_KEY = 'fintech-theme'
 const COLLAPSED_STORAGE_KEY = 'fintech-sidebar-collapsed'
-const BOT_CONFIG_KEY = 'fintech-bot-config-v1'
-const BOT_STATE_KEY = 'fintech-bot-state-v1'
-const USER_PORTFOLIO_KEY = 'fintech-portfolio-v1'
-const SAVED_NOTES_KEY = 'fintech-notes-v1'
-const PRICE_ALERTS_KEY = 'fintech-alerts-v1'
 
 const defaultBotInstrumentIds = ['aapl', 'msft', 'btcusd', 'ethusd', 'xauusd', 'usdtry']
 
@@ -191,7 +214,7 @@ const avatarOptions = [
 const avatarOptionMap = new Map<string, string>(avatarOptions.map((option) => [option.id, option.icon]))
 const currencyOptions: Array<Profile['preferredCurrency']> = ['TRY', 'USD', 'EUR']
 
-const demoBalance = 100_000
+const demoBalance = 0
 const overviewInstrumentIds = ['aapl', 'btcusd', 'xauusd', 'usdtry']
 const perMarketDetailLimit = 4
 
@@ -206,109 +229,9 @@ const defaultProfile: Profile = {
   joinedAt: new Date().toISOString(),
 }
 
-function readProfile(): Profile {
-  if (typeof window === 'undefined') {
-    return defaultProfile
-  }
-  try {
-    const raw = window.localStorage.getItem(PROFILE_STORAGE_KEY)
-    if (!raw) {
-      return defaultProfile
-    }
-    const parsed = JSON.parse(raw) as Partial<Profile>
-    return { ...defaultProfile, ...parsed }
-  } catch {
-    return defaultProfile
-  }
-}
-
 function getAvatarIcon(avatar: string | undefined): string {
   const normalized = (avatar || '').trim().toUpperCase()
   return avatarOptionMap.get(normalized) ?? (normalized.slice(0, 2) || 'YA')
-}
-
-function readWatchlist(): string[] {
-  if (typeof window === 'undefined') {
-    return []
-  }
-  try {
-    const raw = window.localStorage.getItem(WATCHLIST_STORAGE_KEY)
-    if (!raw) {
-      return ['aapl', 'btcusd', 'xauusd']
-    }
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-const defaultUserPortfolio: UserPosition[] = [
-  { instrumentId: 'aapl', quantity: 10, averageCost: 255, addedAt: new Date().toISOString() },
-  { instrumentId: 'btcusd', quantity: 0.12, averageCost: 76_000, addedAt: new Date().toISOString() },
-  { instrumentId: 'usdtry', quantity: 1500, averageCost: 44.15, addedAt: new Date().toISOString() },
-  { instrumentId: 'xauusd', quantity: 4, averageCost: 2_410, addedAt: new Date().toISOString() },
-]
-
-function readUserPortfolio(): UserPosition[] {
-  if (typeof window === 'undefined') return defaultUserPortfolio
-  try {
-    const raw = window.localStorage.getItem(USER_PORTFOLIO_KEY)
-    if (!raw) return defaultUserPortfolio
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return defaultUserPortfolio
-    return parsed.filter(
-      (p: unknown): p is UserPosition =>
-        typeof p === 'object' &&
-        p !== null &&
-        typeof (p as UserPosition).instrumentId === 'string' &&
-        typeof (p as UserPosition).quantity === 'number' &&
-        typeof (p as UserPosition).averageCost === 'number',
-    )
-  } catch {
-    return defaultUserPortfolio
-  }
-}
-
-function readSavedNotes(): SavedNote[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = window.localStorage.getItem(SAVED_NOTES_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? (parsed as SavedNote[]) : []
-  } catch {
-    return []
-  }
-}
-
-function readPriceAlerts(): PriceAlert[] {
-  if (typeof window === 'undefined') return []
-  try {
-    const raw = window.localStorage.getItem(PRICE_ALERTS_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? (parsed as PriceAlert[]) : []
-  } catch {
-    return []
-  }
-}
-
-function readBotConfig(): BotConfig {
-  if (typeof window === 'undefined') {
-    return defaultBotConfig
-  }
-  try {
-    const raw = window.localStorage.getItem(BOT_CONFIG_KEY)
-    if (!raw) return defaultBotConfig
-    const parsed = JSON.parse(raw) as Partial<BotConfig> & { openAiKey?: string }
-    const { openAiKey: _drop, strategy: _legacyStrategy, ...rest } = parsed
-    void _drop
-    void _legacyStrategy
-    return { ...defaultBotConfig, ...rest, strategy: 'ai' }
-  } catch {
-    return defaultBotConfig
-  }
 }
 
 function portfolioPositionToBotPosition(
@@ -325,27 +248,6 @@ function portfolioPositionToBotPosition(
   }
 }
 
-function readBotState(): BotState {
-  if (typeof window === 'undefined') {
-    return defaultBotState
-  }
-  try {
-    const raw = window.localStorage.getItem(BOT_STATE_KEY)
-    if (!raw) return defaultBotState
-    const parsed = JSON.parse(raw) as Partial<BotState>
-    return {
-      cash: typeof parsed.cash === 'number' ? parsed.cash : defaultBotState.cash,
-      initialCash:
-        typeof parsed.initialCash === 'number' ? parsed.initialCash : defaultBotState.initialCash,
-      positions: Array.isArray(parsed.positions) ? parsed.positions : [],
-      trades: Array.isArray(parsed.trades) ? parsed.trades : [],
-      equityHistory: Array.isArray(parsed.equityHistory) ? parsed.equityHistory : [],
-      lastRunAt: typeof parsed.lastRunAt === 'string' ? parsed.lastRunAt : null,
-    }
-  } catch {
-    return defaultBotState
-  }
-}
 
 type BotStatusMessage = {
   tone: 'ok' | 'warn' | 'info'
@@ -369,9 +271,10 @@ function App() {
   const pageRef = useRef<HTMLDivElement | null>(null)
 
   const [authSession, setAuthSession] = useState<SessionUser | null>(() => getSession())
+  const [authReady, setAuthReady] = useState(false)
 
-  function handleLogout() {
-    authLogout()
+  async function handleLogout() {
+    await authLogout()
     setAuthSession(null)
     navigate('/login')
   }
@@ -385,11 +288,11 @@ function App() {
   })
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
-  const [profile, setProfile] = useState<Profile>(() => readProfile())
-  const [watchlist, setWatchlist] = useState<string[]>(() => readWatchlist())
-  const [userPortfolio, setUserPortfolio] = useState<UserPosition[]>(() => readUserPortfolio())
-  const [savedNotes, setSavedNotes] = useState<SavedNote[]>(() => readSavedNotes())
-  const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>(() => readPriceAlerts())
+  const [profile, setProfile] = useState<Profile>(defaultProfile)
+  const [watchlist, setWatchlist] = useState<string[]>([])
+  const [userPortfolio, setUserPortfolio] = useState<UserPosition[]>([])
+  const [savedNotes, setSavedNotes] = useState<SavedNote[]>([])
+  const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>([])
 
   const [selectedMarket, setSelectedMarket] = useState<MarketTabId>('abd')
   const [selectedInstrumentId, setSelectedInstrumentId] = useState('aapl')
@@ -409,12 +312,9 @@ function App() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
 
-  const [botConfig, setBotConfig] = useState<BotConfig>(() => readBotConfig())
-  const [botState, setBotState] = useState<BotState>(() => readBotState())
-  const [botRunning, setBotRunning] = useState<boolean>(() => {
-    const cfg = readBotConfig()
-    return cfg.autoStart && integrationConfig.openAiAvailable
-  })
+  const [botConfig, setBotConfig] = useState<BotConfig>(defaultBotConfig)
+  const [botState, setBotState] = useState<BotState>(defaultBotState)
+  const [botRunning, setBotRunning] = useState<boolean>(false)
   const [botScanning, setBotScanning] = useState(false)
   const [botStatus, setBotStatus] = useState<BotStatusMessage | null>(null)
   const [botDecisionLog, setBotDecisionLog] = useState<BotDecisionLogEntry[]>([])
@@ -443,61 +343,132 @@ function App() {
     globalThis.localStorage?.setItem(COLLAPSED_STORAGE_KEY, sidebarCollapsed ? '1' : '0')
   }, [sidebarCollapsed])
 
+  // ── Supabase auth: session yükle + değişiklikleri dinle
   useEffect(() => {
-    try {
-      window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile))
-    } catch {
-      // ignore
+    let mounted = true
+    void (async () => {
+      const session = await refreshSessionUser()
+      if (!mounted) return
+      setAuthSession(session)
+      setAuthReady(true)
+    })()
+    const unsubscribe = onAuthChange(async (s) => {
+      if (!s) {
+        const { data } = await supabase.auth.getSession()
+        if (data.session) {
+          const restored = await refreshSessionUser()
+          setAuthSession(restored)
+          return
+        }
+        setAuthSession(null)
+        return
+      }
+      const session = await refreshSessionUser()
+      setAuthSession(session)
+    })
+    return () => {
+      mounted = false
+      unsubscribe()
     }
-  }, [profile])
+  }, [])
 
+  // ── Bot config: değişiklikte 600ms debounce ile Supabase'e yaz
+  const botCfgInitialized = useRef(false)
   useEffect(() => {
-    try {
-      window.localStorage.setItem(WATCHLIST_STORAGE_KEY, JSON.stringify(watchlist))
-    } catch {
-      // ignore
+    if (!authSession) return
+    if (!botCfgInitialized.current) {
+      botCfgInitialized.current = true
+      return
     }
-  }, [watchlist])
+    const handle = setTimeout(() => {
+      void saveBotConfig(authSession.id, botConfig)
+    }, 600)
+    return () => clearTimeout(handle)
+  }, [authSession?.id, botConfig])
 
+  // ── Bot state: 1.5s debounce (daha sık değişiyor)
+  const botStateInitialized = useRef(false)
   useEffect(() => {
-    try {
-      window.localStorage.setItem(USER_PORTFOLIO_KEY, JSON.stringify(userPortfolio))
-    } catch {
-      // ignore
+    if (!authSession) return
+    if (!botStateInitialized.current) {
+      botStateInitialized.current = true
+      return
     }
-  }, [userPortfolio])
+    const handle = setTimeout(() => {
+      void saveBotState(authSession.id, botState)
+    }, 1500)
+    return () => clearTimeout(handle)
+  }, [authSession?.id, botState])
 
+  // ── Kullanıcı verilerini Supabase'den yükle (giriş sonrası)
   useEffect(() => {
-    try {
-      window.localStorage.setItem(SAVED_NOTES_KEY, JSON.stringify(savedNotes))
-    } catch {
-      // ignore
+    if (!authSession) {
+      setWatchlist([])
+      setUserPortfolio([])
+      setSavedNotes([])
+      setPriceAlerts([])
+      setBotConfig(defaultBotConfig)
+      setBotState(defaultBotState)
+      return
     }
-  }, [savedNotes])
+    let cancelled = false
+    void (async () => {
+      const [wl, positions, notes, alerts, botCfg, botSt, extras] = await Promise.all([
+        fetchWatchlist(authSession.id),
+        fetchPositions(authSession.id),
+        fetchNotes(authSession.id),
+        fetchAlerts(authSession.id),
+        fetchBotConfig<BotConfig>(authSession.id),
+        fetchBotState<BotState>(authSession.id),
+        fetchProfileExtras(authSession.id),
+      ])
+      if (cancelled) return
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(PRICE_ALERTS_KEY, JSON.stringify(priceAlerts))
-    } catch {
-      // ignore
-    }
-  }, [priceAlerts])
+      setWatchlist(wl)
+      setUserPortfolio(
+        positions.map((p) => ({
+          instrumentId: p.instrumentId,
+          quantity: p.quantity,
+          averageCost: p.averageCost,
+          addedAt: p.addedAt,
+        })),
+      )
+      setSavedNotes(
+        notes.map((n) => ({
+          id: n.id,
+          instrumentId: n.instrumentId,
+          symbol: n.symbol,
+          label: n.label,
+          text: n.text,
+          createdAt: n.createdAt,
+        })),
+      )
+      setPriceAlerts(
+        alerts.map((a) => ({
+          id: a.id,
+          instrumentId: a.instrumentId,
+          symbol: a.symbol,
+          price: a.price,
+          createdAt: a.createdAt,
+        })),
+      )
+      if (botCfg) setBotConfig({ ...defaultBotConfig, ...botCfg })
+      if (botSt) setBotState({ ...defaultBotState, ...botSt })
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(BOT_CONFIG_KEY, JSON.stringify(botConfig))
-    } catch {
-      // ignore
+      setProfile({
+        name: authSession.name,
+        email: authSession.email,
+        avatar: authSession.avatar,
+        bio: extras?.bio ?? '',
+        preferredCurrency: ((extras?.preferred_currency as Profile['preferredCurrency']) ?? 'TRY'),
+        joinedAt: authSession.createdAt,
+        photoData: authSession.photoData,
+      })
+    })()
+    return () => {
+      cancelled = true
     }
-  }, [botConfig])
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(BOT_STATE_KEY, JSON.stringify(botState))
-    } catch {
-      // ignore
-    }
-  }, [botState])
+  }, [authSession?.id])
 
   useLayoutEffect(() => {
     if (!shellRef.current) {
@@ -712,8 +683,13 @@ function App() {
     userPortfolioRef.current = userPortfolio
   }, [userPortfolio])
 
+  const watchlistRef = useRef<string[]>([])
+  useEffect(() => {
+    watchlistRef.current = watchlist
+  }, [watchlist])
+
   const refreshOverviewQuotes = useCallback(async () => {
-    const watchlistInstrumentObjects = readWatchlist()
+    const watchlistInstrumentObjects = watchlistRef.current
       .map((id) => instruments.find((item) => item.id === id))
       .filter((item): item is InstrumentConfig => Boolean(item))
     const positionInstruments = userPortfolioRef.current
@@ -1032,6 +1008,18 @@ function App() {
           side: executedSide,
           total: valuation.total,
         })
+        if (authSession?.id) {
+          void recordBotTrade(authSession.id, {
+            instrumentId: instrument.id,
+            side: executedSide,
+            quantity: executedQty,
+            price: livePrice,
+            confidence: decision.confidence,
+            reason: decision.reasoning,
+          }).catch((err: unknown) => {
+            console.error('[bot] recordBotTrade failed', err)
+          })
+        }
       }
       setBotDecisionLog((prev) =>
         [
@@ -1062,7 +1050,7 @@ function App() {
     } finally {
       setBotScanning(false)
     }
-  }, [pushActivity])
+  }, [authSession?.id, pushActivity])
 
   useEffect(() => {
     if (!botRunning) {
@@ -1135,19 +1123,30 @@ function App() {
     })
   }, [pushActivity])
 
-  const toggleWatchlist = useCallback((instrumentId: string) => {
-    setWatchlist((current) =>
-      current.includes(instrumentId)
-        ? current.filter((id) => id !== instrumentId)
-        : [...current, instrumentId],
-    )
-  }, [])
+  const toggleWatchlist = useCallback(
+    (instrumentId: string) => {
+      const userId = authSession?.id
+      setWatchlist((current) => {
+        const exists = current.includes(instrumentId)
+        if (userId) {
+          if (exists) void removeWatchlistItem(userId, instrumentId)
+          else void addWatchlistItem(userId, instrumentId)
+        }
+        return exists
+          ? current.filter((id) => id !== instrumentId)
+          : [...current, instrumentId]
+      })
+    },
+    [authSession?.id],
+  )
 
   const upsertUserPosition = useCallback(
     (instrumentId: string, quantity: number, averageCost: number) => {
       if (!Number.isFinite(quantity) || !Number.isFinite(averageCost) || quantity <= 0 || averageCost <= 0) {
         return
       }
+      const userId = authSession?.id
+      if (userId) void upsertPosition(userId, instrumentId, quantity, averageCost)
       setUserPortfolio((current) => {
         const exists = current.some((p) => p.instrumentId === instrumentId)
         if (exists) {
@@ -1161,54 +1160,89 @@ function App() {
         ]
       })
     },
-    [],
+    [authSession?.id],
   )
 
-  const removeUserPosition = useCallback((instrumentId: string) => {
-    setUserPortfolio((current) => current.filter((p) => p.instrumentId !== instrumentId))
-  }, [])
+  const removeUserPosition = useCallback(
+    (instrumentId: string) => {
+      const userId = authSession?.id
+      if (userId) void removePosition(userId, instrumentId)
+      setUserPortfolio((current) => current.filter((p) => p.instrumentId !== instrumentId))
+    },
+    [authSession?.id],
+  )
 
-  const addSavedNote = useCallback((instrument: InstrumentConfig, text: string) => {
-    const trimmed = text.trim()
-    if (!trimmed) return
-    setSavedNotes((current) =>
-      [
-        {
-          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-          instrumentId: instrument.id,
-          symbol: instrument.symbol,
-          label: instrument.label,
-          text: trimmed,
-          createdAt: new Date().toISOString(),
-        },
-        ...current,
-      ].slice(0, 50),
-    )
-  }, [])
+  const addSavedNote = useCallback(
+    (instrument: InstrumentConfig, text: string) => {
+      const trimmed = text.trim()
+      if (!trimmed) return
+      const userId = authSession?.id
+      const tmpId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      const localNote: SavedNote = {
+        id: tmpId,
+        instrumentId: instrument.id,
+        symbol: instrument.symbol,
+        label: instrument.label,
+        text: trimmed,
+        createdAt: new Date().toISOString(),
+      }
+      setSavedNotes((current) => [localNote, ...current].slice(0, 50))
+      if (userId) {
+        void dbAddNote(userId, instrument.id, instrument.symbol, instrument.label, trimmed).then(
+          (saved) => {
+            if (!saved) return
+            setSavedNotes((current) =>
+              current.map((n) => (n.id === tmpId ? { ...n, id: saved.id, createdAt: saved.createdAt } : n)),
+            )
+          },
+        )
+      }
+    },
+    [authSession?.id],
+  )
 
-  const removeSavedNote = useCallback((noteId: string) => {
-    setSavedNotes((current) => current.filter((n) => n.id !== noteId))
-  }, [])
+  const removeSavedNote = useCallback(
+    (noteId: string) => {
+      const userId = authSession?.id
+      if (userId) void dbDeleteNote(userId, noteId)
+      setSavedNotes((current) => current.filter((n) => n.id !== noteId))
+    },
+    [authSession?.id],
+  )
 
-  const addPriceAlert = useCallback((instrument: InstrumentConfig, price: number) => {
-    if (!Number.isFinite(price) || price <= 0) return
-    setPriceAlerts((current) =>
-      [
-        {
-          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-          instrumentId: instrument.id,
-          symbol: instrument.symbol,
-          price,
-          createdAt: new Date().toISOString(),
-        },
-        ...current,
-      ].slice(0, 50),
-    )
-  }, [])
+  const addPriceAlert = useCallback(
+    (instrument: InstrumentConfig, price: number) => {
+      if (!Number.isFinite(price) || price <= 0) return
+      const userId = authSession?.id
+      const tmpId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      const localAlert: PriceAlert = {
+        id: tmpId,
+        instrumentId: instrument.id,
+        symbol: instrument.symbol,
+        price,
+        createdAt: new Date().toISOString(),
+      }
+      setPriceAlerts((current) => [localAlert, ...current].slice(0, 50))
+      if (userId) {
+        void dbAddAlert(userId, instrument.id, instrument.symbol, price).then((saved) => {
+          if (!saved) return
+          setPriceAlerts((current) =>
+            current.map((a) => (a.id === tmpId ? { ...a, id: saved.id, createdAt: saved.createdAt } : a)),
+          )
+        })
+      }
+    },
+    [authSession?.id],
+  )
 
-  const removePriceAlert = useCallback((alertId: string) => {
-    setPriceAlerts((current) => current.filter((a) => a.id !== alertId))
-  }, [])
+  const removePriceAlert = useCallback(
+    (alertId: string) => {
+      const userId = authSession?.id
+      if (userId) void dbDeleteAlert(userId, alertId)
+      setPriceAlerts((current) => current.filter((a) => a.id !== alertId))
+    },
+    [authSession?.id],
+  )
 
   const isInWatchlist = useCallback(
     (instrumentId: string) => watchlist.includes(instrumentId),
@@ -1316,6 +1350,16 @@ function App() {
   const tickerLoop = tickerBase.length > 0 ? [...tickerBase, ...tickerBase] : []
 
   if (!authSession) {
+    if (!authReady) {
+      return (
+        <div className="login-page">
+          <div className="login-bg-anim" />
+          <div style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>
+            <RefreshCw size={18} className="spin" /> Oturum yükleniyor…
+          </div>
+        </div>
+      )
+    }
     return (
       <LoginPage
         onLogin={(session) => {
@@ -1595,7 +1639,7 @@ function App() {
                 />
               }
             />
-            <Route path="/destek" element={<SupportPage />} />
+            <Route path="/destek" element={<SupportPage session={authSession} />} />
             <Route path="/profil" element={<ProfilePage {...sharedPageProps} session={authSession} onSessionUpdate={setAuthSession} />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
@@ -2977,37 +3021,68 @@ function readingTime(paragraphs: string[]): number {
 
 
 
+const CATEGORY_META: Record<string, { gradient: [string, string]; icon: string }> = {
+  'teknik-analiz': { gradient: ['#2563eb', '#0ea5e9'], icon: '📈' },
+  'risk-yonetimi': { gradient: ['#7c3aed', '#c026d3'], icon: '🛡️' },
+  kriptopara: { gradient: ['#f59e0b', '#ef4444'], icon: '₿' },
+  forex: { gradient: ['#10b981', '#0d9488'], icon: '💱' },
+  hisse: { gradient: ['#3b82f6', '#6366f1'], icon: '📊' },
+  genel: { gradient: ['#64748b', '#475569'], icon: '💡' },
+}
+
 function LearnPage() {
   const [selectedPost, setSelectedPost] = useState<EduPost | null>(null)
-  const [adminPosts, setAdminPosts] = useState<EduPost[]>(() => {
-    try {
-      const raw = localStorage.getItem('fintech-edu-posts-v1')
-      const all: EduPost[] = raw ? JSON.parse(raw) : []
-      return all.filter((p) => p.publishedAt).sort(
-        (a, b) => new Date(b.publishedAt!).getTime() - new Date(a.publishedAt!).getTime(),
-      )
-    } catch {
-      return []
-    }
-  })
+  const [adminPosts, setAdminPosts] = useState<EduPost[]>([])
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   useEffect(() => {
-    function onStorage(e: StorageEvent) {
-      if (e.key === 'fintech-edu-posts-v1') {
-        try {
-          const all: EduPost[] = e.newValue ? JSON.parse(e.newValue) : []
-          setAdminPosts(
-            all
-              .filter((p) => p.publishedAt)
-              .sort((a, b) => new Date(b.publishedAt!).getTime() - new Date(a.publishedAt!).getTime()),
-          )
-        } catch {
-          /* ignore */
-        }
+    let cancelled = false
+    const reloadPublishedPosts = async () => {
+      try {
+        const { fetchPublishedPosts } = await import('./lib/db')
+        const rows = await fetchPublishedPosts()
+        if (cancelled) return
+        const mapped: EduPost[] = rows.map((p) => {
+          const meta = CATEGORY_META[p.category] ?? CATEGORY_META.genel
+          return {
+            id: p.id,
+            title: p.title,
+            topic: p.topic,
+            summary: p.summary,
+            paragraphs: p.paragraphs,
+            category: p.category,
+            gradient: meta.gradient,
+            icon: meta.icon,
+            coverImage: p.coverImageUrl ?? undefined,
+            author: p.author,
+            createdAt: p.createdAt,
+            publishedAt: p.publishedAt,
+          }
+        })
+        setAdminPosts(mapped)
+        setLoadError(null)
+      } catch (err: unknown) {
+        if (cancelled) return
+        setLoadError(
+          err instanceof Error
+            ? err.message
+            : 'Blog içerikleri yüklenemedi. Lütfen daha sonra tekrar dene.',
+        )
       }
     }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
+
+    void reloadPublishedPosts()
+    // Realtime: yeni post yayınlandığında otomatik güncelle
+    const channel = supabase
+      .channel('public:edu_posts')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'edu_posts' }, () => {
+        void reloadPublishedPosts()
+      })
+      .subscribe()
+    return () => {
+      cancelled = true
+      void supabase.removeChannel(channel)
+    }
   }, [])
 
   // ── Full Article View ──
@@ -3105,6 +3180,11 @@ function LearnPage() {
 
   return (
     <div className="page-stack">
+      {loadError && (
+        <section className="card page-enter">
+          <div className="form-error">{loadError}</div>
+        </section>
+      )}
       {/* Blog listing */}
       {adminPosts.length > 0 && (
         <section className="page-enter">
@@ -3251,29 +3331,94 @@ function ProfilePage({
   const [savedAt, setSavedAt] = useState<string | null>(null)
   const photoInputRef = useRef<HTMLInputElement>(null)
 
+  const [oldPwd, setOldPwd] = useState('')
+  const [newPwd, setNewPwd] = useState('')
+  const [newPwd2, setNewPwd2] = useState('')
+  const [pwdMessage, setPwdMessage] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null)
+  const [pwdLoading, setPwdLoading] = useState(false)
+  const [loginHistory, setLoginHistory] = useState<LoginHistoryEntry[]>([])
+
+  useEffect(() => {
+    if (!session) return
+    void (async () => {
+      const list = await getLoginHistoryForUser(session.id)
+      setLoginHistory(list)
+    })()
+  }, [session])
+
+  async function handlePasswordChange(event: React.FormEvent) {
+    event.preventDefault()
+    setPwdMessage(null)
+    if (!session) return
+    if (newPwd !== newPwd2) {
+      setPwdMessage({ tone: 'err', text: 'Yeni şifreler birbirini tutmuyor.' })
+      return
+    }
+    if (newPwd.length < 6) {
+      setPwdMessage({ tone: 'err', text: 'Şifre en az 6 karakter olmalıdır.' })
+      return
+    }
+    setPwdLoading(true)
+    const ok = await changePassword(session.id, oldPwd, newPwd)
+    setPwdLoading(false)
+    if (!ok) {
+      setPwdMessage({ tone: 'err', text: 'Mevcut şifren hatalı.' })
+      return
+    }
+    setOldPwd('')
+    setNewPwd('')
+    setNewPwd2('')
+    setPwdMessage({ tone: 'ok', text: 'Şifren başarıyla güncellendi.' })
+    addLog('success', 'Profil', 'Şifre değiştirildi', null, session.id)
+  }
+
   const totalQuotes = loadedQuotesCount + failedQuotes.length
   const liveScore = totalQuotes === 0 ? 0 : Math.round((loadedQuotesCount / totalQuotes) * 100)
 
-  function handleSubmit(event: React.FormEvent) {
+  async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
     setProfile(draft)
     if (session) {
-      updateUserProfile(session.id, { name: draft.name, email: draft.email, avatar: draft.avatar, photoData: draft.photoData })
-      onSessionUpdate({ ...session, name: draft.name, email: draft.email, avatar: draft.avatar, photoData: draft.photoData })
+      await updateUserProfile(session.id, {
+        name: draft.name,
+        email: draft.email,
+        avatar: draft.avatar,
+        photoData: draft.photoData,
+        bio: draft.bio,
+        preferred_currency: draft.preferredCurrency,
+      })
+      onSessionUpdate({
+        ...session,
+        name: draft.name,
+        email: draft.email,
+        avatar: draft.avatar,
+        photoData: draft.photoData,
+      })
     }
     setSavedAt(new Date().toISOString())
     addLog('info', 'Profil', 'Profil güncellendi', null, session?.id)
   }
 
-  function handlePhotoUpload(event: React.ChangeEvent<HTMLInputElement>) {
+  async function handlePhotoUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     if (!file) return
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const photoData = e.target?.result as string
-      setDraft((d) => ({ ...d, photoData }))
+    if (!session) {
+      // Oturum yoksa local preview göster
+      const reader = new FileReader()
+      reader.onload = (e) => {
+        const photoData = e.target?.result as string
+        setDraft((d) => ({ ...d, photoData }))
+      }
+      reader.readAsDataURL(file)
+      return
     }
-    reader.readAsDataURL(file)
+    // Supabase Storage'a yükle, URL'i profile.photoData (photo_url) olarak sakla
+    const publicUrl = await uploadProfilePhoto(session.id, file)
+    if (publicUrl) {
+      setDraft((d) => ({ ...d, photoData: publicUrl }))
+      await updateUserProfile(session.id, { photoData: publicUrl })
+      onSessionUpdate({ ...session, photoData: publicUrl })
+    }
   }
 
   return (
@@ -3424,28 +3569,81 @@ function ProfilePage({
         <header className="card-head">
           <div>
             <p className="eyebrow">Güvenlik</p>
-            <h3>Hesap koruması</h3>
+            <h3>Şifre değiştir</h3>
           </div>
           <ShieldCheck size={20} />
         </header>
-        <ul className="security-list">
-          <li>
-            <strong>İki adımlı doğrulama</strong>
-            <p className="muted">Hesabını ek doğrulama ile koruyabilirsin.</p>
-          </li>
-          <li>
-            <strong>Cihaz onayı</strong>
-            <p className="muted">Yeni cihaz girişlerinde ek onay süreci uygulanır.</p>
-          </li>
-          <li>
-            <strong>Oturum geçmişi</strong>
-            <p className="muted">Son giriş hareketlerini görüntüleyebilirsin.</p>
-          </li>
-          <li>
-            <strong>Şüpheli giriş bildirimi</strong>
-            <p className="muted">Beklenmeyen erişimde anında uyarı gönderilir.</p>
-          </li>
-        </ul>
+        <form className="profile-form" onSubmit={handlePasswordChange}>
+          <label className="form-field">
+            <span>Mevcut şifre</span>
+            <input
+              type="password"
+              value={oldPwd}
+              onChange={(e) => setOldPwd(e.target.value)}
+              autoComplete="current-password"
+              placeholder="••••••••"
+              required
+            />
+          </label>
+          <label className="form-field">
+            <span>Yeni şifre</span>
+            <input
+              type="password"
+              value={newPwd}
+              onChange={(e) => setNewPwd(e.target.value)}
+              autoComplete="new-password"
+              placeholder="En az 6 karakter"
+              required
+            />
+          </label>
+          <label className="form-field">
+            <span>Yeni şifre (tekrar)</span>
+            <input
+              type="password"
+              value={newPwd2}
+              onChange={(e) => setNewPwd2(e.target.value)}
+              autoComplete="new-password"
+              placeholder="Yeniden gir"
+              required
+            />
+          </label>
+          {pwdMessage && (
+            <div className={pwdMessage.tone === 'ok' ? 'inline-success full' : 'inline-error full'}>
+              {pwdMessage.text}
+            </div>
+          )}
+          <div className="form-actions">
+            <button type="submit" className="primary-button" disabled={pwdLoading}>
+              {pwdLoading ? <RefreshCw size={14} className="spin" /> : <ShieldCheck size={14} />}
+              {pwdLoading ? ' Güncelleniyor…' : ' Şifreyi güncelle'}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section className="card page-enter">
+        <header className="card-head">
+          <div>
+            <p className="eyebrow">Oturum geçmişi</p>
+            <h3>Son giriş hareketleri</h3>
+          </div>
+          <small className="muted">Toplam {loginHistory.length}</small>
+        </header>
+        {loginHistory.length === 0 ? (
+          <p className="muted small">Henüz kayıt yok. Çıkış yapıp tekrar giriş yaptığında burada görünür.</p>
+        ) : (
+          <div className="session-history">
+            {loginHistory.slice(0, 10).map((entry) => (
+              <div key={entry.id} className={`session-row session-${entry.outcome}`}>
+                <div>
+                  <strong>{entry.outcome === 'success' ? 'Başarılı giriş' : 'Başarısız deneme'}</strong>
+                  <p className="muted small">{entry.userAgent ? entry.userAgent.slice(0, 80) : 'Bilinmeyen cihaz'}</p>
+                </div>
+                <time className="muted small">{new Date(entry.at).toLocaleString('tr-TR')}</time>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   )
@@ -4425,41 +4623,70 @@ function mapIndicatorStatus(status: string) {
 
 function LoginPage({ onLogin }: { onLogin: (session: SessionUser) => void }) {
   const [tab, setTab] = useState<'login' | 'register'>('login')
+  const [mode, setMode] = useState<'auth' | 'forgot'>('auth')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
+  const [forgotIdentifier, setForgotIdentifier] = useState('')
+  const [info, setInfo] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
 
-  function handleLogin(e: React.FormEvent) {
-    e.preventDefault()
+  function resetAllFields() {
     setError('')
-    setLoading(true)
-    setTimeout(() => {
-      const session = login(username.trim(), password)
-      setLoading(false)
-      if (!session) {
-        setError('Kullanıcı adı veya şifre hatalı.')
-        return
-      }
-      onLogin(session)
-    }, 400)
+    setInfo('')
+    setForgotIdentifier('')
+    setShowPassword(false)
   }
 
-  function handleRegister(e: React.FormEvent) {
+  async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
     setError('')
     setLoading(true)
-    setTimeout(() => {
-      const result = register(username.trim(), password, name.trim(), email.trim())
-      setLoading(false)
-      if ('error' in result) {
-        setError(result.error)
-        return
-      }
-      onLogin(result.user)
-    }, 400)
+    const session = await login(username.trim(), password)
+    setLoading(false)
+    if (!session) {
+      setError(getLastLoginError() || 'Kullanıcı adı/e-posta veya şifre hatalı.')
+      return
+    }
+    onLogin(session)
+  }
+
+  async function handleRegister(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+    const result = await register(username.trim(), password, name.trim(), email.trim())
+    setLoading(false)
+    if ('error' in result) {
+      setError(result.error)
+      return
+    }
+    setInfo(
+      'Hesabın oluşturuldu. E-postana gönderilen onay bağlantısına tıkladıktan sonra giriş yapabilirsin.',
+    )
+    setMode('auth')
+    setTab('login')
+    const activeSession = getSession()
+    if (activeSession) onLogin(activeSession)
+  }
+
+  async function handleForgot(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    setInfo('')
+    setLoading(true)
+    const result = await requestPasswordReset(forgotIdentifier)
+    setLoading(false)
+    if ('error' in result) {
+      setError(result.error)
+      return
+    }
+    setInfo(
+      'Şifre sıfırlama bağlantısı e-postanıza gönderildi. Bağlantıya tıklayıp yeni şifrenizi belirleyebilirsiniz.',
+    )
   }
 
   return (
@@ -4477,24 +4704,26 @@ function LoginPage({ onLogin }: { onLogin: (session: SessionUser) => void }) {
         </div>
         <p className="login-subtitle">Gerçek zamanlı piyasa analizi ve AI trade botu platformu</p>
 
-        <div className="login-tabs">
-          <button
-            type="button"
-            className={tab === 'login' ? 'login-tab is-active' : 'login-tab'}
-            onClick={() => { setTab('login'); setError('') }}
-          >
-            Giriş Yap
-          </button>
-          <button
-            type="button"
-            className={tab === 'register' ? 'login-tab is-active' : 'login-tab'}
-            onClick={() => { setTab('register'); setError('') }}
-          >
-            Kayıt Ol
-          </button>
-        </div>
+        {mode === 'auth' && (
+          <div className="login-tabs">
+            <button
+              type="button"
+              className={tab === 'login' ? 'login-tab is-active' : 'login-tab'}
+              onClick={() => { setTab('login'); resetAllFields() }}
+            >
+              Giriş Yap
+            </button>
+            <button
+              type="button"
+              className={tab === 'register' ? 'login-tab is-active' : 'login-tab'}
+              onClick={() => { setTab('register'); resetAllFields() }}
+            >
+              Kayıt Ol
+            </button>
+          </div>
+        )}
 
-        {tab === 'login' ? (
+        {mode === 'auth' && tab === 'login' && (
           <form className="login-form" onSubmit={handleLogin}>
             <label className="login-field">
               <span>Kullanıcı Adı</span>
@@ -4509,26 +4738,45 @@ function LoginPage({ onLogin }: { onLogin: (session: SessionUser) => void }) {
             </label>
             <label className="login-field">
               <span>Şifre</span>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                autoComplete="current-password"
-                required
-              />
+              <div className="login-password-wrap">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  autoComplete="current-password"
+                  required
+                />
+                <button
+                  type="button"
+                  className="password-toggle-btn"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? 'Şifreyi gizle' : 'Şifreyi göster'}
+                  title={showPassword ? 'Şifreyi gizle' : 'Şifreyi göster'}
+                >
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </label>
             {error && <div className="login-error">{error}</div>}
+            {info && <div className="login-info">{info}</div>}
             <button type="submit" className="login-submit" disabled={loading}>
               {loading ? <RefreshCw size={16} className="spin" /> : null}
               {loading ? 'Giriş yapılıyor…' : 'Giriş Yap'}
             </button>
-            <div className="login-hint">
-              <p><strong>Demo:</strong> demo / demo123</p>
-              <p><strong>Admin:</strong> admin / admin123</p>
+            <div className="login-secondary-actions">
+              <button
+                type="button"
+                className="login-link"
+                onClick={() => { setMode('forgot'); resetAllFields() }}
+              >
+                Şifremi unuttum
+              </button>
             </div>
           </form>
-        ) : (
+        )}
+
+        {mode === 'auth' && tab === 'register' && (
           <form className="login-form" onSubmit={handleRegister}>
             <label className="login-field">
               <span>Ad Soyad</span>
@@ -4561,14 +4809,25 @@ function LoginPage({ onLogin }: { onLogin: (session: SessionUser) => void }) {
             </label>
             <label className="login-field">
               <span>Şifre</span>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="En az 6 karakter"
-                autoComplete="new-password"
-                required
-              />
+              <div className="login-password-wrap">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="En az 6 karakter"
+                  autoComplete="new-password"
+                  required
+                />
+                <button
+                  type="button"
+                  className="password-toggle-btn"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? 'Şifreyi gizle' : 'Şifreyi göster'}
+                  title={showPassword ? 'Şifreyi gizle' : 'Şifreyi göster'}
+                >
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </label>
             {error && <div className="login-error">{error}</div>}
             <button type="submit" className="login-submit" disabled={loading}>
@@ -4577,6 +4836,40 @@ function LoginPage({ onLogin }: { onLogin: (session: SessionUser) => void }) {
             </button>
           </form>
         )}
+
+        {mode === 'forgot' && (
+          <form className="login-form" onSubmit={handleForgot}>
+            <p className="login-subtitle" style={{ marginBottom: 12 }}>
+              Hesabınla ilişkili kullanıcı adı veya e-postayı gir. Sıfırlama kodu oluşturulup
+              gerçek bir sistemde sana e-posta ile gönderilecek.
+            </p>
+            <label className="login-field">
+              <span>Kullanıcı Adı veya E-posta</span>
+              <input
+                type="text"
+                value={forgotIdentifier}
+                onChange={(e) => setForgotIdentifier(e.target.value)}
+                placeholder="kullanici_adi veya ornek@mail.com"
+                required
+              />
+            </label>
+            {error && <div className="login-error">{error}</div>}
+            <button type="submit" className="login-submit" disabled={loading}>
+              {loading ? <RefreshCw size={16} className="spin" /> : null}
+              {loading ? 'Gönderiliyor…' : 'Sıfırlama Kodu Oluştur'}
+            </button>
+            <div className="login-secondary-actions">
+              <button
+                type="button"
+                className="login-link"
+                onClick={() => { setMode('auth'); resetAllFields() }}
+              >
+                ← Girişe geri dön
+              </button>
+            </div>
+          </form>
+        )}
+
       </div>
     </div>
   )
@@ -4592,29 +4885,41 @@ type SupportTicket = {
   status: 'open' | 'closed'
 }
 
-const SUPPORT_KEY = 'fintech-support-v1'
-
-function getSupportTickets(): SupportTicket[] {
-  try {
-    const raw = localStorage.getItem(SUPPORT_KEY)
-    return raw ? (JSON.parse(raw) as SupportTicket[]) : []
-  } catch {
-    return []
-  }
-}
-
-function saveSupportTicket(ticket: SupportTicket): void {
-  const tickets = getSupportTickets()
-  localStorage.setItem(SUPPORT_KEY, JSON.stringify([ticket, ...tickets]))
-}
-
-function SupportPage() {
+function SupportPage({ session }: { session: SessionUser | null }) {
   const [subject, setSubject] = useState('')
   const [message, setMessage] = useState('')
   const [email, setEmail] = useState('')
   const [sent, setSent] = useState(false)
-  const [tickets, setTickets] = useState<SupportTicket[]>(() => getSupportTickets())
+  const [sending, setSending] = useState(false)
+  const [sendError, setSendError] = useState('')
+  const [tickets, setTickets] = useState<SupportTicket[]>([])
   const [openFaq, setOpenFaq] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (!session) {
+      setTickets([])
+      return
+    }
+    void (async () => {
+      const { fetchMyTickets } = await import('./lib/db')
+      const list = await fetchMyTickets(session.id)
+      setTickets(
+        list.map((t) => ({
+          id: t.id,
+          subject: t.subject,
+          message: t.message,
+          email: t.email,
+          createdAt: t.createdAt,
+          status: t.status,
+        })),
+      )
+    })()
+  }, [session])
+
+  useEffect(() => {
+    if (!session) return
+    setEmail((prev) => prev.trim() || session.email || '')
+  }, [session?.id])
 
   const faqs = [
     {
@@ -4639,28 +4944,51 @@ function SupportPage() {
     },
     {
       q: 'Verilerim nerede saklanıyor?',
-      a: 'Tüm veriler yerel tarayıcı depolama alanında (localStorage) tutulur. Sunucu tarafında herhangi bir veri kaydedilmez.',
+      a: 'Kullanıcı verileri Supabase üzerinde (watchlist, portföy, notlar, alarmlar, destek talepleri ve bot verileri) saklanır. Oturum bilgisi tarayıcıda güvenli şekilde tutulur.',
     },
   ]
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    const ticket: SupportTicket = {
-      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
-      subject: subject.trim(),
-      message: message.trim(),
-      email: email.trim(),
-      createdAt: new Date().toISOString(),
-      status: 'open',
+    if (!session || sending) {
+      return
     }
-    saveSupportTicket(ticket)
-    addLog('info', 'Destek', `Yeni destek talebi: ${subject}`)
-    setTickets(getSupportTickets())
-    setSent(true)
-    setSubject('')
-    setMessage('')
-    setEmail('')
-    setTimeout(() => setSent(false), 4000)
+    setSendError('')
+    setSending(true)
+    try {
+      const { createTicket } = await import('./lib/db')
+      const result = await createTicket({
+        subject: subject.trim(),
+        message: message.trim(),
+        email: email.trim(),
+      })
+      if ('error' in result) {
+        setSendError(result.error)
+        return
+      }
+      const created = result.ticket
+      addLog('info', 'Destek', `Yeni destek talebi: ${subject}`, null, session.id)
+      setTickets((curr) => [
+        {
+          id: created.id,
+          subject: created.subject,
+          message: created.message,
+          email: created.email,
+          createdAt: created.createdAt,
+          status: created.status,
+        },
+        ...curr,
+      ])
+      setSent(true)
+      setSubject('')
+      setMessage('')
+      setEmail(session.email || '')
+      setTimeout(() => setSent(false), 4000)
+    } catch {
+      setSendError('Destek talebi gönderilemedi. Lütfen tekrar dene.')
+    } finally {
+      setSending(false)
+    }
   }
 
   return (
@@ -4702,6 +5030,7 @@ function SupportPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="ornek@mail.com"
+                required
               />
             </label>
             <label className="form-field">
@@ -4725,10 +5054,11 @@ function SupportPage() {
               />
             </label>
             <div className="form-actions">
-              <button type="submit" className="primary-button">
-                <MessageSquare size={14} /> Gönder
+              <button type="submit" className="primary-button" disabled={sending || !session}>
+                <MessageSquare size={14} /> {sending ? 'Gönderiliyor…' : 'Gönder'}
               </button>
             </div>
+            {sendError && <div className="login-error">{sendError}</div>}
           </form>
         </article>
 

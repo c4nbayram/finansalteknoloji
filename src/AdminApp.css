@@ -365,6 +365,87 @@
 
 .admin-danger-btn:hover { background: rgba(239, 68, 68, 0.2); }
 
+/* ── Admin form grid (Create User) ── */
+.admin-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 14px 18px 18px;
+}
+
+.admin-form-field {
+  display: grid;
+  gap: 6px;
+}
+
+.admin-form-field > span {
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--a-muted);
+}
+
+.admin-form-field input,
+.admin-form-field select {
+  background: var(--a-surface);
+  border: 1px solid var(--a-border);
+  border-radius: 9px;
+  padding: 9px 12px;
+  color: var(--a-text);
+  font-size: 0.9rem;
+  font-family: inherit;
+  transition: border-color 160ms, box-shadow 160ms;
+  width: 100%;
+}
+
+.admin-form-field input:focus,
+.admin-form-field select:focus {
+  outline: none;
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.15);
+}
+
+.admin-form-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.admin-inline-reset {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.admin-inline-reset input {
+  background: var(--a-surface);
+  border: 1px solid var(--a-border);
+  border-radius: 9px;
+  padding: 8px 12px;
+  color: var(--a-text);
+  font-size: 0.88rem;
+  flex: 1;
+  min-width: 200px;
+}
+
+.admin-inline-reset input:focus {
+  outline: none;
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.15);
+}
+
+@media (max-width: 720px) {
+  .admin-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ── Forms ── */
 .admin-field {
   display: grid;

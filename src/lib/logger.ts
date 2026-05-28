@@ -1,3 +1,5 @@
+import { supabase } from './supabase'
+
 export type LogLevel = 'info' | 'warn' | 'error' | 'success' | 'trade'
 
 export type LogEntry = {
@@ -10,40 +12,27 @@ export type LogEntry = {
   userId?: string
 }
 
-const LOGS_KEY = 'fintech-logs-v1'
-const MAX_ENTRIES = 2000
+const MAX_CACHE = 500
 
 type LogListener = (logs: LogEntry[]) => void
 
 let _listeners: LogListener[] = []
-let _cache: LogEntry[] | null = null
+let _cache: LogEntry[] = []
 
-function _load(): LogEntry[] {
-  if (_cache) return _cache
-  try {
-    const raw = localStorage.getItem(LOGS_KEY)
-    _cache = raw ? (JSON.parse(raw) as LogEntry[]) : []
-  } catch {
-    _cache = []
-  }
-  return _cache
+function _emit(): void {
+  for (const fn of _listeners) fn(_cache)
 }
 
-function _save(logs: LogEntry[]): void {
-  _cache = logs
-  try {
-    localStorage.setItem(LOGS_KEY, JSON.stringify(logs))
-  } catch {
-    // quota exceeded — trim to half and retry
-    const trimmed = logs.slice(0, Math.floor(logs.length / 2))
-    _cache = trimmed
-    try {
-      localStorage.setItem(LOGS_KEY, JSON.stringify(trimmed))
-    } catch {
-      // give up
-    }
+function rowToEntry(r: Record<string, unknown>): LogEntry {
+  return {
+    id: String(r.id),
+    timestamp: String(r.created_at),
+    level: (r.level as LogLevel) ?? 'info',
+    source: String(r.source ?? ''),
+    message: String(r.message ?? ''),
+    data: r.data ? JSON.stringify(r.data).slice(0, 400) : undefined,
+    userId: (r.user_id as string | undefined) ?? undefined,
   }
-  for (const fn of _listeners) fn(logs)
 }
 
 export function addLog(
@@ -62,28 +51,44 @@ export function addLog(
     data: data !== undefined ? JSON.stringify(data).slice(0, 400) : undefined,
     userId,
   }
-  const logs = _load()
-  _save([entry, ...logs].slice(0, MAX_ENTRIES))
+  _cache = [entry, ..._cache].slice(0, MAX_CACHE)
+  _emit()
+  // Fire-and-forget insert to Supabase
+  void supabase.from('activity_logs').insert({
+    user_id: userId ?? null,
+    level,
+    source,
+    message,
+    data: data ?? null,
+  })
   return entry
 }
 
 export function getLogs(options?: { limit?: number; level?: LogLevel; source?: string }): LogEntry[] {
-  const all = _load()
-  let result = all
+  let result = _cache
   if (options?.level) result = result.filter((l) => l.level === options.level)
   if (options?.source) result = result.filter((l) => l.source === options.source)
   if (options?.limit) result = result.slice(0, options.limit)
   return result
 }
 
-export function clearLogs(): void {
+export async function fetchLogsFromServer(limit = 200): Promise<LogEntry[]> {
+  const { data } = await supabase
+    .from('activity_logs')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit)
+  const rows = (data ?? []).map((r) => rowToEntry(r as Record<string, unknown>))
+  _cache = rows
+  _emit()
+  return rows
+}
+
+export async function clearLogs(): Promise<void> {
+  // Note: requires admin RLS. Non-admin will only clear local cache.
+  await supabase.from('activity_logs').delete().neq('id', '00000000-0000-0000-0000-000000000000')
   _cache = []
-  try {
-    localStorage.removeItem(LOGS_KEY)
-  } catch {
-    // ignore
-  }
-  for (const fn of _listeners) fn([])
+  _emit()
 }
 
 export function subscribeLogs(fn: LogListener): () => void {
@@ -91,12 +96,4 @@ export function subscribeLogs(fn: LogListener): () => void {
   return () => {
     _listeners = _listeners.filter((l) => l !== fn)
   }
-}
-
-if (typeof window !== 'undefined') {
-  window.addEventListener('storage', (e) => {
-    if (e.key === LOGS_KEY) {
-      _cache = null
-    }
-  })
 }

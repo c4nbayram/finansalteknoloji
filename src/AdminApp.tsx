@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+﻿import { useState, useEffect, useRef } from 'react'
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import {
   Activity,
@@ -9,10 +9,12 @@ import {
   Eye,
   FileText,
   Image,
+  Key,
   LayoutDashboard,
   LogOut,
   Mail,
   Moon,
+  Plus,
   RefreshCw,
   Save,
   Send,
@@ -21,23 +23,44 @@ import {
   Trash2,
   TrendingUp,
   Upload,
+  UserPlus,
   Users,
   X,
   Zap,
 } from 'lucide-react'
 import {
-  getSession,
   login,
   logout as authLogout,
   getUsers,
   deleteUser,
+  adminCreateUser,
+  adminResetPassword,
+  refreshSessionUser,
+  onAuthChange,
   type SessionUser,
   type AuthUser,
 } from './lib/auth'
-import { getLogs, clearLogs, subscribeLogs, type LogEntry } from './lib/logger'
+import {
+  getLogs,
+  clearLogs,
+  fetchLogsFromServer,
+  subscribeLogs,
+  type LogEntry,
+} from './lib/logger'
+import {
+  fetchAllPosts,
+  upsertEduPost,
+  deleteEduPost,
+  fetchAllTickets,
+  setTicketStatus as dbSetTicketStatus,
+  deleteTicket as dbDeleteTicket,
+  fetchBotState,
+  uploadBlogCover,
+  type DbSupportTicket,
+} from './lib/db'
+import { supabase } from './lib/supabase'
 import './AdminApp.css'
 
-// ── Types ────────────────────────────────────────────────────────────────────
 
 export type EduCategory =
   | 'teknik-analiz'
@@ -64,24 +87,18 @@ export type EduPost = {
 
 type SupportTicket = {
   id: string
+  userId: string
   subject: string
   message: string
   email: string
+  senderName: string
+  senderUsername: string
+  senderRole: 'admin' | 'user'
   createdAt: string
   status: 'open' | 'closed'
 }
 
-const EDU_POSTS_KEY = 'fintech-edu-posts-v1'
-const SUPPORT_KEY = 'fintech-support-v1'
 const ADMIN_THEME_KEY = 'fintech-admin-theme'
-const MAIN_ORIGIN = 'http://localhost:5173'
-
-// Module-level bridge window reference (set once iframe loads)
-let _bridge: Window | null = null
-
-function syncToMain(key: string, value: string): void {
-  _bridge?.postMessage({ type: 'LS_SET', key, value }, MAIN_ORIGIN)
-}
 
 const CATEGORY_META: Record<EduCategory, { label: string; gradient: [string, string]; icon: string }> = {
   'teknik-analiz': { label: 'Teknik Analiz', gradient: ['#2563eb', '#0ea5e9'], icon: '📈' },
@@ -89,49 +106,64 @@ const CATEGORY_META: Record<EduCategory, { label: string; gradient: [string, str
   kriptopara: { label: 'Kripto Para', gradient: ['#f59e0b', '#ef4444'], icon: '₿' },
   forex: { label: 'Forex / Döviz', gradient: ['#10b981', '#0d9488'], icon: '💱' },
   hisse: { label: 'Hisse Senedi', gradient: ['#3b82f6', '#6366f1'], icon: '📊' },
-  genel: { label: 'Genel Finans', gradient: ['#64748b', '#475569'], icon: '💡' },
+  genel: { label: 'Genel Finans', gradient: ['#64748b', '#475569'], icon: '💼' },
 }
 
-// ── localStorage helpers ──────────────────────────────────────────────────────
 
-export function getEduPosts(): EduPost[] {
-  try {
-    const raw = localStorage.getItem(EDU_POSTS_KEY)
-    return raw ? (JSON.parse(raw) as EduPost[]) : []
-  } catch {
-    return []
+function dbRowToEduPost(r: {
+  id: string
+  title: string
+  topic: string
+  summary: string
+  paragraphs: string[]
+  category: string
+  coverImageUrl: string | null
+  author: string
+  createdAt: string
+  publishedAt: string | null
+}): EduPost {
+  const cat = (r.category as EduCategory) in CATEGORY_META ? (r.category as EduCategory) : 'genel'
+  const meta = CATEGORY_META[cat]
+  return {
+    id: r.id,
+    title: r.title,
+    topic: r.topic,
+    summary: r.summary,
+    paragraphs: r.paragraphs,
+    category: cat,
+    gradient: meta.gradient,
+    icon: meta.icon,
+    coverImage: r.coverImageUrl ?? undefined,
+    author: r.author,
+    createdAt: r.createdAt,
+    publishedAt: r.publishedAt,
   }
 }
 
-function saveEduPosts(posts: EduPost[]): void {
-  const serialised = JSON.stringify(posts)
-  try {
-    localStorage.setItem(EDU_POSTS_KEY, serialised)
-  } catch {
-    // ignore quota exceeded
-  }
-  // Sync to main site (localhost:5173) via the bridge iframe
-  syncToMain(EDU_POSTS_KEY, serialised)
+export async function getEduPosts(): Promise<EduPost[]> {
+  const rows = await fetchAllPosts()
+  return rows.map(dbRowToEduPost)
 }
 
-function getSupportTickets(): SupportTicket[] {
-  try {
-    const raw = localStorage.getItem(SUPPORT_KEY)
-    return raw ? (JSON.parse(raw) as SupportTicket[]) : []
-  } catch {
-    return []
-  }
+function hydrateSupportTickets(rows: DbSupportTicket[], users: AuthUser[]): SupportTicket[] {
+  const usersById = new Map(users.map((u) => [u.id, u] as const))
+  return rows.map((r) => {
+    const user = usersById.get(r.userId)
+    return {
+      id: r.id,
+      userId: r.userId,
+      subject: r.subject,
+      message: r.message,
+      email: r.email,
+      senderName: user?.name ?? '-',
+      senderUsername: user?.username ?? '-',
+      senderRole: user?.role ?? 'user',
+      createdAt: r.createdAt,
+      status: r.status,
+    }
+  })
 }
 
-function saveSupportTickets(tickets: SupportTicket[]): void {
-  try {
-    localStorage.setItem(SUPPORT_KEY, JSON.stringify(tickets))
-  } catch {
-    // ignore
-  }
-}
-
-// ── OpenAI helper ─────────────────────────────────────────────────────────────
 
 async function generateArticle(
   topic: string,
@@ -196,13 +228,11 @@ ZORUNLU FORMAT - Sadece JSON döndür, başka hiçbir şey yok:
   return parsed
 }
 
-// ── AdminApp root ─────────────────────────────────────────────────────────────
 
 export default function AdminApp() {
-  const [session, setSession] = useState<SessionUser | null>(() => {
-    const s = getSession()
-    return s?.role === 'admin' ? s : null
-  })
+  const [session, setSession] = useState<SessionUser | null>(null)
+  const [authReady, setAuthReady] = useState(false)
+  const [tickets, setTickets] = useState<SupportTicket[]>([])
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     return (localStorage.getItem(ADMIN_THEME_KEY) ?? 'dark') as 'light' | 'dark'
   })
@@ -212,14 +242,75 @@ export default function AdminApp() {
     localStorage.setItem(ADMIN_THEME_KEY, theme)
   }, [theme])
 
-  function handleLogout() {
-    authLogout()
+  useEffect(() => {
+    let mounted = true
+    void (async () => {
+      const s = await refreshSessionUser()
+      if (!mounted) return
+      setSession(s?.role === 'admin' ? s : null)
+      setAuthReady(true)
+    })()
+    const unsub = onAuthChange(async (sb) => {
+      if (!sb) {
+        setSession(null)
+        return
+      }
+      const s = await refreshSessionUser()
+      setSession(s?.role === 'admin' ? s : null)
+    })
+    return () => {
+      mounted = false
+      unsub()
+    }
+  }, [])
+
+  async function handleLogout() {
+    await authLogout()
     setSession(null)
+    setTickets([])
   }
 
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
 
+  useEffect(() => {
+    if (!session) return
+    let cancelled = false
+
+    const refreshTickets = async () => {
+      const [rows, users] = await Promise.all([fetchAllTickets(), getUsers()])
+      if (cancelled) return
+      setTickets(hydrateSupportTickets(rows, users))
+    }
+
+    void refreshTickets()
+
+    const channel = supabase
+      .channel(`admin-support-${session.id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'support_tickets' },
+        () => {
+          void refreshTickets()
+        },
+      )
+      .subscribe()
+
+    return () => {
+      cancelled = true
+      void supabase.removeChannel(channel)
+    }
+  }, [session?.id])
+
   if (!session) {
+    if (!authReady) {
+      return (
+        <div className="admin-login-page" data-admin-theme={theme}>
+          <div style={{ color: 'var(--a-muted)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <RefreshCw size={18} className="admin-spin" /> Oturum yükleniyor...
+          </div>
+        </div>
+      )
+    }
     return (
       <AdminLoginPage
         onLogin={(s) => setSession(s)}
@@ -231,30 +322,21 @@ export default function AdminApp() {
 
   return (
     <div className="admin-root" data-admin-theme={theme}>
-      {/* Invisible bridge iframe — writes to localhost's localStorage on behalf of admin.localhost */}
-      <iframe
-        src={`${MAIN_ORIGIN}?bridge=1`}
-        title="sync-bridge"
-        aria-hidden="true"
-        style={{ display: 'none', position: 'absolute', width: 0, height: 0, border: 'none' }}
-        onLoad={(e) => {
-          _bridge = (e.target as HTMLIFrameElement).contentWindow
-        }}
-      />
       <AdminSidebar
         session={session}
         onLogout={handleLogout}
         theme={theme}
         onToggleTheme={toggleTheme}
+        openTicketCount={tickets.filter((t) => t.status === 'open').length}
       />
       <main className="admin-main">
         <Routes>
-          <Route path="/" element={<AdminDashboard session={session} />} />
+          <Route path="/" element={<AdminDashboard session={session} tickets={tickets} />} />
           <Route path="/egitim" element={<ContentGeneratorPage session={session} />} />
-          <Route path="/mesajlar" element={<MessagesPage />} />
+          <Route path="/mesajlar" element={<MessagesPage tickets={tickets} onTicketsChange={setTickets} />} />
           <Route path="/kullanicilar" element={<UsersPage session={session} />} />
           <Route path="/loglar" element={<LogsPage />} />
-          <Route path="/bot" element={<BotMonitorPage />} />
+          <Route path="/bot" element={<BotMonitorPage session={session} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
@@ -262,7 +344,6 @@ export default function AdminApp() {
   )
 }
 
-// ── AdminLoginPage ─────────────────────────────────────────────────────────────
 
 function AdminLoginPage({
   onLogin,
@@ -278,23 +359,21 @@ function AdminLoginPage({
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
     setLoading(true)
-    setTimeout(() => {
-      const s = login(username.trim(), password)
-      setLoading(false)
-      if (!s) {
-        setError('Geçersiz kimlik bilgileri.')
-        return
-      }
-      if (s.role !== 'admin') {
-        setError('Bu panel yalnızca yöneticilere açıktır.')
-        return
-      }
-      onLogin(s)
-    }, 500)
+    const s = await login(username.trim(), password)
+    setLoading(false)
+    if (!s) {
+      setError('Geçersiz kimlik bilgileri.')
+      return
+    }
+    if (s.role !== 'admin') {
+      setError('Bu panel yalnızca yöneticilere açıktır.')
+      return
+    }
+    onLogin(s)
   }
 
   return (
@@ -341,7 +420,7 @@ function AdminLoginPage({
           {error && <div className="admin-login-error">{error}</div>}
           <button type="submit" className="admin-login-submit" disabled={loading}>
             {loading ? <RefreshCw size={16} className="admin-spin" /> : <ShieldCheck size={16} />}
-            {loading ? 'Doğrulanıyor…' : 'Giriş Yap'}
+            {loading ? 'Doğrulanıyor...' : 'Giriş Yap'}
           </button>
         </form>
         <p className="admin-login-note">
@@ -352,7 +431,6 @@ function AdminLoginPage({
   )
 }
 
-// ── AdminSidebar ───────────────────────────────────────────────────────────────
 
 const adminNavItems = [
   { path: '/', label: 'Genel Bakış', icon: LayoutDashboard, end: true },
@@ -368,14 +446,14 @@ function AdminSidebar({
   onLogout,
   theme,
   onToggleTheme,
+  openTicketCount,
 }: {
   session: SessionUser
   onLogout: () => void
   theme: 'light' | 'dark'
   onToggleTheme: () => void
+  openTicketCount: number
 }) {
-  const ticketCount = getSupportTickets().filter((t) => t.status === 'open').length
-
   return (
     <aside className="admin-sidebar">
       <div className="admin-sidebar-brand">
@@ -415,8 +493,8 @@ function AdminSidebar({
             >
               <Icon size={18} />
               <span>{item.label}</span>
-              {item.path === '/mesajlar' && ticketCount > 0 && (
-                <span className="admin-nav-badge">{ticketCount}</span>
+              {item.path === '/mesajlar' && openTicketCount > 0 && (
+                <span className="admin-nav-badge">{openTicketCount}</span>
               )}
             </NavLink>
           )
@@ -447,23 +525,32 @@ function AdminSidebar({
   )
 }
 
-// ── AdminDashboard ─────────────────────────────────────────────────────────────
 
-function AdminDashboard({ session }: { session: SessionUser }) {
-  const posts = getEduPosts()
-  const users = getUsers()
-  const tickets = getSupportTickets()
+function AdminDashboard({ session, tickets }: { session: SessionUser; tickets: SupportTicket[] }) {
+  const [posts, setPosts] = useState<EduPost[]>([])
+  const [users, setUsers] = useState<AuthUser[]>([])
+  const [botTradeCount, setBotTradeCount] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const [p, u] = await Promise.all([
+        getEduPosts(),
+        getUsers(),
+      ])
+      if (cancelled) return
+      setPosts(p)
+      setUsers(u)
+      const bs = await fetchBotState<{ trades?: unknown[] }>(session.id)
+      if (!cancelled && bs && Array.isArray(bs.trades)) setBotTradeCount(bs.trades.length)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [session.id])
+
   const publishedPosts = posts.filter((p) => p.publishedAt)
   const openTickets = tickets.filter((t) => t.status === 'open')
-  const botState = (() => {
-    try {
-      return JSON.parse(
-        localStorage.getItem('fintech-bot-state-v1') ?? '{}',
-      ) as { trades?: unknown[]; cash?: number }
-    } catch {
-      return {}
-    }
-  })()
 
   const stats = [
     {
@@ -487,7 +574,7 @@ function AdminDashboard({ session }: { session: SessionUser }) {
     },
     {
       label: 'Bot İşlemi',
-      value: Array.isArray(botState.trades) ? botState.trades.length : 0,
+      value: botTradeCount,
       icon: Bot,
       color: '#a855f7',
     },
@@ -498,7 +585,7 @@ function AdminDashboard({ session }: { session: SessionUser }) {
       <div className="admin-page-header">
         <div>
           <p className="admin-eyebrow">Genel Bakış</p>
-          <h2>Hoş geldin, {session.name} 👋</h2>
+          <h2>Hoş geldin, {session.name}</h2>
           <p className="admin-muted">
             {new Date().toLocaleDateString('tr-TR', {
               weekday: 'long',
@@ -542,7 +629,7 @@ function AdminDashboard({ session }: { session: SessionUser }) {
               <BookOpen size={28} />
               <p>
                 Henüz içerik yok.{' '}
-                <a href="/egitim">İlk içeriği oluştur →</a>
+                <a href="/egitim">İlk içeriği oluştur</a>
               </p>
             </div>
           ) : (
@@ -602,7 +689,7 @@ function AdminDashboard({ session }: { session: SessionUser }) {
                   <div>
                     <strong>{t.subject}</strong>
                     <small>
-                      {t.email || 'E-posta yok'} ·{' '}
+                      {t.senderName} (@{t.senderUsername}) · {t.email || 'E-posta yok'} ·{' '}
                       {new Date(t.createdAt).toLocaleDateString('tr-TR')}
                     </small>
                   </div>
@@ -616,13 +703,12 @@ function AdminDashboard({ session }: { session: SessionUser }) {
   )
 }
 
-// ── ContentGeneratorPage ───────────────────────────────────────────────────────
 
 type GenerateState = 'idle' | 'generating' | 'preview' | 'error'
 type DraftPost = Omit<EduPost, 'id' | 'createdAt' | 'publishedAt' | 'author'>
 
 function ContentGeneratorPage({ session }: { session: SessionUser }) {
-  const [posts, setPosts] = useState<EduPost[]>(() => getEduPosts())
+  const [posts, setPosts] = useState<EduPost[]>([])
   const [topic, setTopic] = useState('')
   const [category, setCategory] = useState<EduCategory>('genel')
   const [apiKey, setApiKey] = useState(
@@ -633,15 +719,28 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
   )
   const [genState, setGenState] = useState<GenerateState>('idle')
   const [genError, setGenError] = useState('')
+  const [dataError, setDataError] = useState('')
   const [draft, setDraft] = useState<DraftPost | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [preUploadedImage, setPreUploadedImage] = useState<string | undefined>(undefined)
+  const [preUploadFile, setPreUploadFile] = useState<File | null>(null)
+  const [draftCoverFile, setDraftCoverFile] = useState<File | null>(null)
   const photoInputRef = useRef<HTMLInputElement>(null)
   const preUploadRef = useRef<HTMLInputElement>(null)
   const editPhotoInputRef = useRef<HTMLInputElement>(null)
 
-  function refreshPosts() {
-    setPosts(getEduPosts())
+  useEffect(() => {
+    void refreshPosts()
+  }, [])
+
+  async function refreshPosts() {
+    try {
+      const all = await getEduPosts()
+      setPosts(all)
+      setDataError('')
+    } catch (err: unknown) {
+      setDataError(err instanceof Error ? err.message : 'İçerikler alınamadı.')
+    }
   }
 
   async function handleGenerate() {
@@ -683,55 +782,104 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
       const coverImage = ev.target?.result as string
       if (forDraft) {
         setDraft((d) => (d ? { ...d, coverImage } : d))
+        setDraftCoverFile(file)
       }
     }
     reader.readAsDataURL(file)
   }
 
-  function savePost(publishNow: boolean) {
+  async function savePost(publishNow: boolean) {
     if (!draft) return
-    const post: EduPost = {
-      id: `post-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-      ...draft,
-      author: session.name,
-      createdAt: new Date().toISOString(),
-      publishedAt: publishNow ? new Date().toISOString() : null,
+    try {
+      // Önce kapak resmini Supabase Storage'a yükle (dosya varsa)
+      let coverUrl: string | null | undefined = draft.coverImage
+      const fileToUpload = draftCoverFile ?? preUploadFile
+      if (fileToUpload) {
+        coverUrl = await uploadBlogCover(fileToUpload)
+      } else if (draft.coverImage && draft.coverImage.startsWith('data:')) {
+        // dataUrl => Blob => upload
+        const { dataUrlToBlob } = await import('./lib/db')
+        const blob = dataUrlToBlob(draft.coverImage)
+        if (blob) {
+          const file = new File([blob], 'cover.jpg', { type: blob.type })
+          coverUrl = await uploadBlogCover(file)
+        }
+      }
+
+      await upsertEduPost({
+        title: draft.title,
+        topic: draft.topic,
+        summary: draft.summary,
+        paragraphs: draft.paragraphs,
+        category: draft.category,
+        coverImageUrl: coverUrl ?? null,
+        author: session.name,
+        publishedAt: publishNow ? new Date().toISOString() : null,
+      })
+      await refreshPosts()
+      setDraft(null)
+      setDraftCoverFile(null)
+      setGenState('idle')
+      setTopic('')
+      setPreUploadedImage(undefined)
+      setPreUploadFile(null)
+      setGenError('')
+      setDataError('')
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : publishNow
+            ? 'İçerik yayınlanamadı.'
+            : 'Taslak kaydedilemedi.'
+      setGenError(message)
+      setGenState('error')
     }
-    const updated = [post, ...getEduPosts()]
-    saveEduPosts(updated)
-    setPosts(updated)
-    setDraft(null)
-    setGenState('idle')
-    setTopic('')
-    setPreUploadedImage(undefined)
   }
 
-  function togglePublish(postId: string) {
-    const updated = getEduPosts().map((p) =>
-      p.id === postId
-        ? { ...p, publishedAt: p.publishedAt ? null : new Date().toISOString() }
-        : p,
-    )
-    saveEduPosts(updated)
-    setPosts(updated)
+  async function togglePublish(postId: string) {
+    const post = posts.find((p) => p.id === postId)
+    if (!post) return
+    try {
+      await upsertEduPost({
+        id: postId,
+        publishedAt: post.publishedAt ? null : new Date().toISOString(),
+      })
+      await refreshPosts()
+      setDataError('')
+    } catch (err: unknown) {
+      setDataError(err instanceof Error ? err.message : 'Yayın durumu güncellenemedi.')
+    }
   }
 
-  function updatePostPhoto(postId: string, coverImage: string) {
-    const updated = getEduPosts().map((p) =>
-      p.id === postId ? { ...p, coverImage } : p,
-    )
-    saveEduPosts(updated)
-    setPosts(updated)
+  async function updatePostPhoto(postId: string, file: File) {
+    try {
+      const url = await uploadBlogCover(file)
+      if (!url) {
+        setDataError('Görsel yüklenemedi.')
+        return
+      }
+      await upsertEduPost({ id: postId, coverImageUrl: url })
+      await refreshPosts()
+      setDataError('')
+    } catch (err: unknown) {
+      setDataError(err instanceof Error ? err.message : 'Görsel güncellenemedi.')
+    }
   }
 
-  function handleDelete(postId: string) {
+  async function handleDelete(postId: string) {
     if (deleteConfirm !== postId) {
       setDeleteConfirm(postId)
       return
     }
-    saveEduPosts(getEduPosts().filter((p) => p.id !== postId))
-    refreshPosts()
-    setDeleteConfirm(null)
+    try {
+      await deleteEduPost(postId)
+      await refreshPosts()
+      setDeleteConfirm(null)
+      setDataError('')
+    } catch (err: unknown) {
+      setDataError(err instanceof Error ? err.message : 'İçerik silinemedi.')
+    }
   }
 
   const published = posts.filter((p) => p.publishedAt)
@@ -753,7 +901,14 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
         </div>
       </div>
 
-      {/* ── Generator Card ── */}
+      {dataError && (
+        <div className="admin-error-box">
+          <AlertTriangle size={16} />
+          {dataError}
+        </div>
+      )}
+
+      {/* Generator Card */}
       <div className="admin-card admin-generator-card">
         <div className="admin-card-head">
           <Zap size={18} />
@@ -763,7 +918,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
 
         <div className="admin-generator-inputs">
 
-          {/* ── Image BEFORE generation ── */}
+          {/* Image BEFORE generation */}
           <div className="admin-field">
             <span>Kapak Görseli (İçerik üretilmeden önce yükle)</span>
             {preUploadedImage ? (
@@ -782,7 +937,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
               <button type="button" className="admin-cover-upload-zone admin-cover-upload-zone-sm" onClick={() => preUploadRef.current?.click()}>
                 <Upload size={22} />
                 <strong>Görsel yükle</strong>
-                <small>PNG, JPG, WebP · 1200×630px önerilir</small>
+                <small>PNG, JPG, WebP · 1200x630px önerilir</small>
               </button>
             )}
             <input
@@ -793,6 +948,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
               onChange={(e) => {
                 const file = e.target.files?.[0]
                 if (!file) return
+                setPreUploadFile(file)
                 const reader = new FileReader()
                 reader.onload = (ev) => setPreUploadedImage(ev.target?.result as string)
                 reader.readAsDataURL(file)
@@ -865,7 +1021,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
           >
             {genState === 'generating' ? (
               <>
-                <RefreshCw size={16} className="admin-spin" /> Üretiliyor…
+                <RefreshCw size={16} className="admin-spin" /> Üretiliyor...
               </>
             ) : (
               <>
@@ -883,7 +1039,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
         </div>
       </div>
 
-      {/* ── Preview ── */}
+      {/* Preview */}
       {genState === 'preview' && draft && (
         <div className="admin-card admin-preview-card">
           <div className="admin-card-head">
@@ -951,7 +1107,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
               >
                 <Upload size={28} />
                 <strong>Kapak Görseli Ekle</strong>
-                <small>PNG, JPG, WebP · Önerilen: 1200×630px</small>
+                <small>PNG, JPG, WebP · Önerilen: 1200x630px</small>
               </button>
             )}
             <input
@@ -1017,7 +1173,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
         </div>
       )}
 
-      {/* ── Posts List ── */}
+      {/* Posts List */}
       <div className="admin-card">
         <div className="admin-card-head">
           <FileText size={18} />
@@ -1065,7 +1221,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
                     {CATEGORY_META[post.category].label} ·{' '}
                     {new Date(post.createdAt).toLocaleDateString('tr-TR')} ·{' '}
                     {post.paragraphs.length} paragraf
-                    {post.coverImage ? ' · 📷 Görsel' : ''}
+                    {post.coverImage ? ' · Görsel' : ''}
                   </small>
                   <p className="admin-post-summary">{post.summary}</p>
                 </div>
@@ -1088,11 +1244,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
                       onChange={(e) => {
                         const file = e.target.files?.[0]
                         if (!file) return
-                        const reader = new FileReader()
-                        reader.onload = (ev) => {
-                          updatePostPhoto(post.id, ev.target?.result as string)
-                        }
-                        reader.readAsDataURL(file)
+                        void updatePostPhoto(post.id, file)
                         e.target.value = ''
                       }}
                     />
@@ -1129,34 +1281,44 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
   )
 }
 
-// ── MessagesPage ───────────────────────────────────────────────────────────────
 
-function MessagesPage() {
-  const [tickets, setTickets] = useState<SupportTicket[]>(() => getSupportTickets())
+function MessagesPage({
+  tickets,
+  onTicketsChange,
+}: {
+  tickets: SupportTicket[]
+  onTicketsChange: React.Dispatch<React.SetStateAction<SupportTicket[]>>
+}) {
   const [selected, setSelected] = useState<SupportTicket | null>(null)
   const [filter, setFilter] = useState<'all' | 'open' | 'closed'>('all')
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
-  function refresh() {
-    setTickets(getSupportTickets())
-  }
+  useEffect(() => {
+    if (!selected) return
+    const fresh = tickets.find((t) => t.id === selected.id) ?? null
+    setSelected(fresh)
+  }, [tickets, selected?.id])
 
-  function toggleStatus(id: string) {
-    const updated = tickets.map((t) =>
-      t.id === id ? { ...t, status: t.status === 'open' ? ('closed' as const) : ('open' as const) } : t,
-    )
-    saveSupportTickets(updated)
-    setTickets(updated)
+  async function toggleStatus(id: string) {
+    const target = tickets.find((t) => t.id === id)
+    if (!target) return
+    const next: 'open' | 'closed' = target.status === 'open' ? 'closed' : 'open'
+    await dbSetTicketStatus(id, next)
+    const updated = tickets.map((t) => (t.id === id ? { ...t, status: next } : t))
+    onTicketsChange(updated)
     if (selected?.id === id) {
       setSelected(updated.find((t) => t.id === id) ?? null)
     }
   }
 
-  function handleDelete(id: string) {
-    if (deleteConfirm !== id) { setDeleteConfirm(id); return }
+  async function handleDelete(id: string) {
+    if (deleteConfirm !== id) {
+      setDeleteConfirm(id)
+      return
+    }
+    await dbDeleteTicket(id)
     const updated = tickets.filter((t) => t.id !== id)
-    saveSupportTickets(updated)
-    setTickets(updated)
+    onTicketsChange(updated)
     if (selected?.id === id) setSelected(null)
     setDeleteConfirm(null)
   }
@@ -1177,9 +1339,7 @@ function MessagesPage() {
         <div className="admin-header-meta">
           <span className="admin-badge red">{openCount} Açık</span>
           <span className="admin-badge green">{tickets.length - openCount} Kapalı</span>
-          <button type="button" className="admin-ghost-btn" onClick={refresh}>
-            <RefreshCw size={14} /> Yenile
-          </button>
+          <span className="admin-badge blue">Canlı</span>
         </div>
       </div>
 
@@ -1229,7 +1389,7 @@ function MessagesPage() {
                       <strong>{t.subject}</strong>
                       <time>{new Date(t.createdAt).toLocaleDateString('tr-TR')}</time>
                     </div>
-                    <small>{t.email || 'E-posta yok'}</small>
+                    <small>{t.senderName} (@{t.senderUsername}) · {t.email || 'E-posta yok'}</small>
                     <p className="admin-ticket-excerpt">{t.message}</p>
                   </div>
                 </button>
@@ -1269,7 +1429,19 @@ function MessagesPage() {
                 <div className="admin-message-meta-row">
                   <div className="admin-message-meta-item">
                     <span>Gönderen</span>
+                    <strong>{selected.senderName} (@{selected.senderUsername})</strong>
+                  </div>
+                  <div className="admin-message-meta-item">
+                    <span>Hesap E-postası</span>
                     <strong>{selected.email || 'E-posta belirtilmemiş'}</strong>
+                  </div>
+                  <div className="admin-message-meta-item">
+                    <span>Kullanıcı ID</span>
+                    <strong>{selected.userId}</strong>
+                  </div>
+                  <div className="admin-message-meta-item">
+                    <span>Rol</span>
+                    <strong>{selected.senderRole}</strong>
                   </div>
                   <div className="admin-message-meta-item">
                     <span>Tarih</span>
@@ -1312,20 +1484,84 @@ function MessagesPage() {
   )
 }
 
-// ── UsersPage ─────────────────────────────────────────────────────────────────
 
 function UsersPage({ session }: { session: SessionUser }) {
-  const [users, setUsers] = useState<AuthUser[]>(() => getUsers())
+  const [users, setUsers] = useState<AuthUser[]>([])
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+  const [resetForUser, setResetForUser] = useState<string | null>(null)
+  const [resetValue, setResetValue] = useState('')
+  const [resetMsg, setResetMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null)
 
-  function handleDelete(id: string) {
+  const [showCreate, setShowCreate] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newUsername, setNewUsername] = useState('')
+  const [newEmail, setNewEmail] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [newRole, setNewRole] = useState<'user' | 'admin'>('user')
+  const [createMsg, setCreateMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null)
+  const [createLoading, setCreateLoading] = useState(false)
+
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  async function refresh() {
+    const u = await getUsers()
+    setUsers(u)
+  }
+
+  async function handleDelete(id: string) {
     if (deleteConfirm !== id) {
       setDeleteConfirm(id)
       return
     }
-    deleteUser(id)
-    setUsers(getUsers())
+    await deleteUser(id)
+    await refresh()
     setDeleteConfirm(null)
+  }
+
+  async function handleResetSubmit(id: string) {
+    setResetMsg(null)
+    if (resetValue.length < 6) {
+      setResetMsg({ tone: 'err', text: 'Yeni şifre en az 6 karakter olmalıdır.' })
+      return
+    }
+    const ok = await adminResetPassword(id, resetValue)
+    if (!ok) {
+      setResetMsg({
+        tone: 'err',
+        text: 'Şifre güncellenemedi. Bu işlem için Supabase Edge Function (service-role) gerekiyor.',
+      })
+      return
+    }
+    setResetMsg({ tone: 'ok', text: 'Şifre güncellendi.' })
+    setResetValue('')
+    setResetForUser(null)
+  }
+
+  async function handleCreate(e: React.FormEvent) {
+    e.preventDefault()
+    setCreateMsg(null)
+    setCreateLoading(true)
+    const result = await adminCreateUser({
+      username: newUsername,
+      password: newPassword,
+      name: newName,
+      email: newEmail,
+      role: newRole,
+    })
+    setCreateLoading(false)
+    if ('error' in result) {
+      setCreateMsg({ tone: 'err', text: result.error })
+      return
+    }
+    setCreateMsg({ tone: 'ok', text: `${result.user.username} oluşturuldu.` })
+    setNewName('')
+    setNewUsername('')
+    setNewEmail('')
+    setNewPassword('')
+    setNewRole('user')
+    await refresh()
   }
 
   return (
@@ -1335,14 +1571,90 @@ function UsersPage({ session }: { session: SessionUser }) {
           <p className="admin-eyebrow">Kullanıcı Yönetimi</p>
           <h2>Kayıtlı Kullanıcılar</h2>
         </div>
-        <button
-          type="button"
-          className="admin-ghost-btn"
-          onClick={() => setUsers(getUsers())}
-        >
-          <RefreshCw size={14} /> Yenile
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            type="button"
+            className="admin-primary-btn"
+            onClick={() => { setShowCreate((s) => !s); setCreateMsg(null) }}
+          >
+            <UserPlus size={14} /> Yeni Kullanıcı
+          </button>
+          <button type="button" className="admin-ghost-btn" onClick={refresh}>
+            <RefreshCw size={14} /> Yenile
+          </button>
+        </div>
       </div>
+
+      {showCreate && (
+        <div className="admin-card">
+          <div className="admin-card-head">
+            <Plus size={18} />
+            <h3>Yeni kullanıcı oluştur</h3>
+          </div>
+          <form className="admin-form-grid" onSubmit={handleCreate}>
+            <label className="admin-form-field">
+              <span>Ad Soyad</span>
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="Adı Soyadı"
+              />
+            </label>
+            <label className="admin-form-field">
+              <span>Kullanıcı Adı</span>
+              <input
+                type="text"
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+                placeholder="kullanici_adi"
+                required
+              />
+            </label>
+            <label className="admin-form-field">
+              <span>E-posta</span>
+              <input
+                type="email"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                placeholder="ornek@mail.com"
+              />
+            </label>
+            <label className="admin-form-field">
+              <span>Şifre</span>
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="En az 6 karakter"
+                required
+              />
+            </label>
+            <label className="admin-form-field">
+              <span>Rol</span>
+              <select
+                className="admin-select"
+                value={newRole}
+                onChange={(e) => setNewRole(e.target.value as 'user' | 'admin')}
+              >
+                <option value="user">Kullanıcı</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+            <div className="admin-form-actions">
+              {createMsg && (
+                <span className={createMsg.tone === 'ok' ? 'admin-badge green' : 'admin-badge red'}>
+                  {createMsg.text}
+                </span>
+              )}
+              <button type="submit" className="admin-primary-btn" disabled={createLoading}>
+                {createLoading ? <RefreshCw size={14} className="admin-spin" /> : <CheckCircle size={14} />}
+                {createLoading ? ' Oluşturuluyor...' : ' Oluştur'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       <div className="admin-card">
         <div className="admin-card-head">
@@ -1369,12 +1681,50 @@ function UsersPage({ session }: { session: SessionUser }) {
                   {u.lastLoginAt &&
                     ` · Son giriş: ${new Date(u.lastLoginAt).toLocaleString('tr-TR')}`}
                 </small>
+                {resetForUser === u.id && (
+                  <div className="admin-inline-reset">
+                    <input
+                      type="password"
+                      value={resetValue}
+                      onChange={(e) => setResetValue(e.target.value)}
+                      placeholder="Yeni şifre (en az 6 karakter)"
+                      autoFocus
+                    />
+                    <button
+                      type="button"
+                      className="admin-primary-btn"
+                      onClick={() => handleResetSubmit(u.id)}
+                    >
+                      Uygula
+                    </button>
+                    <button
+                      type="button"
+                      className="admin-ghost-btn"
+                      onClick={() => { setResetForUser(null); setResetValue(''); setResetMsg(null) }}
+                    >
+                      İptal
+                    </button>
+                    {resetMsg && (
+                      <span className={resetMsg.tone === 'ok' ? 'admin-badge green' : 'admin-badge red'}>
+                        {resetMsg.text}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
               <span
                 className={u.role === 'admin' ? 'admin-badge blue' : 'admin-badge gray'}
               >
                 {u.role === 'admin' ? 'Admin' : 'Kullanıcı'}
               </span>
+              <button
+                type="button"
+                className="admin-ghost-btn"
+                onClick={() => { setResetForUser(resetForUser === u.id ? null : u.id); setResetValue(''); setResetMsg(null) }}
+                title="Şifre sıfırla"
+              >
+                <Key size={14} /> Şifre
+              </button>
               {u.id !== session.id && (
                 <button
                   type="button"
@@ -1395,13 +1745,13 @@ function UsersPage({ session }: { session: SessionUser }) {
   )
 }
 
-// ── LogsPage ──────────────────────────────────────────────────────────────────
 
 function LogsPage() {
   const [logs, setLogs] = useState<LogEntry[]>(() => getLogs())
   const [filter, setFilter] = useState('all')
 
   useEffect(() => {
+    void fetchLogsFromServer(500)
     return subscribeLogs((updated) => setLogs(updated))
   }, [])
 
@@ -1439,8 +1789,7 @@ function LogsPage() {
             type="button"
             className="admin-danger-btn"
             onClick={() => {
-              clearLogs()
-              setLogs([])
+              void clearLogs()
             }}
           >
             <Trash2 size={14} /> Temizle
@@ -1483,38 +1832,34 @@ function LogsPage() {
   )
 }
 
-// ── BotMonitorPage ────────────────────────────────────────────────────────────
 
-function BotMonitorPage() {
-  const [botState, setBotState] = useState<{
-    cash?: number
-    initialCash?: number
-    positions?: unknown[]
-    trades?: Array<{
-      side: string
-      symbol: string
-      price: number
-      timestamp: string
-      quantity: number
-      confidence: number
-      reason: string
-    }>
-    equityHistory?: Array<{ at: string; total: number }>
-    lastRunAt?: string | null
-  }>(() => {
-    try {
-      return JSON.parse(localStorage.getItem('fintech-bot-state-v1') ?? '{}')
-    } catch {
-      return {}
-    }
-  })
+type AdminBotState = {
+  cash?: number
+  initialCash?: number
+  positions?: unknown[]
+  trades?: Array<{
+    side: string
+    symbol: string
+    price: number
+    timestamp: string
+    quantity: number
+    confidence: number
+    reason: string
+  }>
+  equityHistory?: Array<{ at: string; total: number }>
+  lastRunAt?: string | null
+}
 
-  function refresh() {
-    try {
-      setBotState(JSON.parse(localStorage.getItem('fintech-bot-state-v1') ?? '{}'))
-    } catch {
-      /* ignore */
-    }
+function BotMonitorPage({ session }: { session: SessionUser }) {
+  const [botState, setBotState] = useState<AdminBotState>({})
+
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  async function refresh() {
+    const data = await fetchBotState<AdminBotState>(session.id)
+    setBotState(data ?? {})
   }
 
   const trades = botState.trades ?? []
@@ -1614,4 +1959,5 @@ function BotMonitorPage() {
     </div>
   )
 }
+
 
