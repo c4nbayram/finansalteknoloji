@@ -101,6 +101,11 @@ import {
   fetchPositions,
   upsertPosition,
   removePosition,
+  fetchPortfolioWallet,
+  savePortfolioWallet,
+  fetchPendingLimitOrders,
+  addPendingLimitOrder as dbAddPendingLimitOrder,
+  deletePendingLimitOrder as dbDeletePendingLimitOrder,
   fetchNotes,
   addNote as dbAddNote,
   deleteNote as dbDeleteNote,
@@ -112,10 +117,14 @@ import {
   fetchBotState,
   saveBotState,
   recordBotTrade,
+  fetchBotWalletTransfers,
+  addBotWalletTransfer,
   fetchProfileExtras,
   uploadProfilePhoto,
+  type DbBotWalletTransfer,
 } from './lib/db'
 import { addLog } from './lib/logger'
+import { migrateLocalStorageToSupabase } from './lib/migration'
 import {
   appendEquityPoint,
   botPortfolioValue,
@@ -124,8 +133,8 @@ import {
   evaluateWithAi,
   executeBuy,
   executeSell,
+  previewBuyAllocation,
   INTERVAL_OPTIONS,
-  RISK_FACTORS,
   RISK_LABEL,
   type ActivityEvent,
   type BotConfig,
@@ -177,6 +186,18 @@ type PriceAlert = {
   createdAt: string
 }
 
+type PendingLimitOrder = {
+  id: string
+  instrumentId: string
+  symbol: string
+  label: string
+  market: MarketTabId
+  quantity: number
+  limitPrice: number
+  commissionRate: number
+  createdAt: string
+}
+
 type ChartType = 'candle' | 'line' | 'area'
 
 const THEME_STORAGE_KEY = 'fintech-theme'
@@ -198,7 +219,7 @@ const navItems: NavItem[] = [
 ]
 
 const avatarOptions = [
-  { id: 'YA', icon: '🧑‍💼', label: 'Yatirimci' },
+  { id: 'YA', icon: '👤', label: 'Yatirimci' },
   { id: 'BT', icon: '🤖', label: 'Bot Trader' },
   { id: 'FT', icon: '💼', label: 'Finans Uzmani' },
   { id: 'AI', icon: '🧠', label: 'AI Analist' },
@@ -214,9 +235,7 @@ const avatarOptions = [
 const avatarOptionMap = new Map<string, string>(avatarOptions.map((option) => [option.id, option.icon]))
 const currencyOptions: Array<Profile['preferredCurrency']> = ['TRY', 'USD', 'EUR']
 
-const demoBalance = 0
 const overviewInstrumentIds = ['aapl', 'btcusd', 'xauusd', 'usdtry']
-const perMarketDetailLimit = 4
 
 const positionPalette = ['#3b82f6', '#10b981', '#f59e0b', '#a855f7', '#ec4899', '#14b8a6']
 
@@ -264,6 +283,20 @@ type BotDecisionLogEntry = {
   price: number
 }
 
+type BotCashTransferSource = 'portfolio_cash' | 'external_topup' | 'portfolio_withdraw'
+
+type BotCashTransferRequest = {
+  amount: number
+  source: BotCashTransferSource
+  direction: 'in' | 'out'
+  currency: BotConfig['currency']
+  quotePair?: string
+  quoteMode?: 'bid' | 'ask' | 'mid'
+  exchangeRate?: number
+  convertedAmount?: number
+  note?: string
+}
+
 function App() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -291,6 +324,9 @@ function App() {
   const [profile, setProfile] = useState<Profile>(defaultProfile)
   const [watchlist, setWatchlist] = useState<string[]>([])
   const [userPortfolio, setUserPortfolio] = useState<UserPosition[]>([])
+  const [withdrawableCash, setWithdrawableCash] = useState(0)
+  const [withdrawnCashTotal, setWithdrawnCashTotal] = useState(0)
+  const [pendingLimitOrders, setPendingLimitOrders] = useState<PendingLimitOrder[]>([])
   const [savedNotes, setSavedNotes] = useState<SavedNote[]>([])
   const [priceAlerts, setPriceAlerts] = useState<PriceAlert[]>([])
 
@@ -319,6 +355,7 @@ function App() {
   const [botStatus, setBotStatus] = useState<BotStatusMessage | null>(null)
   const [botDecisionLog, setBotDecisionLog] = useState<BotDecisionLogEntry[]>([])
   const [botActivity, setBotActivity] = useState<ActivityEvent[]>([])
+  const [botWalletTransfers, setBotWalletTransfers] = useState<DbBotWalletTransfer[]>([])
   const [showBotConfigModal, setShowBotConfigModal] = useState(false)
 
   const pushActivity = useCallback((event: Omit<ActivityEvent, 'id' | 'at'>) => {
@@ -343,7 +380,7 @@ function App() {
     globalThis.localStorage?.setItem(COLLAPSED_STORAGE_KEY, sidebarCollapsed ? '1' : '0')
   }, [sidebarCollapsed])
 
-  // ── Supabase auth: session yükle + değişiklikleri dinle
+  // ¦¦ Supabase auth: session yükle + değişiklikleri dinle
   useEffect(() => {
     let mounted = true
     void (async () => {
@@ -372,7 +409,7 @@ function App() {
     }
   }, [])
 
-  // ── Bot config: değişiklikte 600ms debounce ile Supabase'e yaz
+  // ¦¦ Bot config: değişiklikte 600ms debounce ile Supabase'e yaz
   const botCfgInitialized = useRef(false)
   useEffect(() => {
     if (!authSession) return
@@ -386,7 +423,7 @@ function App() {
     return () => clearTimeout(handle)
   }, [authSession?.id, botConfig])
 
-  // ── Bot state: 1.5s debounce (daha sık değişiyor)
+  // ¦¦ Bot state: 1.5s debounce (daha sık değişiyor)
   const botStateInitialized = useRef(false)
   useEffect(() => {
     if (!authSession) return
@@ -400,26 +437,48 @@ function App() {
     return () => clearTimeout(handle)
   }, [authSession?.id, botState])
 
-  // ── Kullanıcı verilerini Supabase'den yükle (giriş sonrası)
+  const walletInitialized = useRef(false)
+  useEffect(() => {
+    if (!authSession || !walletInitialized.current) return
+    const handle = setTimeout(() => {
+      void savePortfolioWallet(authSession.id, withdrawableCash, withdrawnCashTotal)
+    }, 500)
+    return () => clearTimeout(handle)
+  }, [authSession?.id, withdrawableCash, withdrawnCashTotal])
+
+  // ¦¦ Kullanıcı verilerini Supabase'den yükle (giriş sonrası)
   useEffect(() => {
     if (!authSession) {
       setWatchlist([])
       setUserPortfolio([])
+      setWithdrawableCash(0)
+      setWithdrawnCashTotal(0)
+      setPendingLimitOrders([])
       setSavedNotes([])
       setPriceAlerts([])
       setBotConfig(defaultBotConfig)
       setBotState(defaultBotState)
+      setBotWalletTransfers([])
+      walletInitialized.current = false
       return
     }
     let cancelled = false
     void (async () => {
-      const [wl, positions, notes, alerts, botCfg, botSt, extras] = await Promise.all([
+      try {
+        await migrateLocalStorageToSupabase(authSession.id)
+      } catch (error) {
+        console.warn('[migration] Local veriler Supabase\'e taşınamadı, mevcut verilerle devam ediliyor.', error)
+      }
+      const [wl, positions, wallet, limitOrders, notes, alerts, botCfg, botSt, transfers, extras] = await Promise.all([
         fetchWatchlist(authSession.id),
         fetchPositions(authSession.id),
+        fetchPortfolioWallet(authSession.id),
+        fetchPendingLimitOrders(authSession.id),
         fetchNotes(authSession.id),
         fetchAlerts(authSession.id),
         fetchBotConfig<BotConfig>(authSession.id),
         fetchBotState<BotState>(authSession.id),
+        fetchBotWalletTransfers(authSession.id, 120),
         fetchProfileExtras(authSession.id),
       ])
       if (cancelled) return
@@ -431,6 +490,22 @@ function App() {
           quantity: p.quantity,
           averageCost: p.averageCost,
           addedAt: p.addedAt,
+        })),
+      )
+      setWithdrawableCash(wallet?.cashBalance ?? 0)
+      setWithdrawnCashTotal(wallet?.withdrawnTotal ?? 0)
+      walletInitialized.current = true
+      setPendingLimitOrders(
+        limitOrders.map((order) => ({
+          id: order.id,
+          instrumentId: order.instrumentId,
+          symbol: order.symbol,
+          label: order.label,
+          market: order.market as MarketTabId,
+          quantity: order.quantity,
+          limitPrice: order.limitPrice,
+          commissionRate: order.commissionRate,
+          createdAt: order.createdAt,
         })),
       )
       setSavedNotes(
@@ -454,6 +529,7 @@ function App() {
       )
       if (botCfg) setBotConfig({ ...defaultBotConfig, ...botCfg })
       if (botSt) setBotState({ ...defaultBotState, ...botSt })
+      setBotWalletTransfers(transfers)
 
       setProfile({
         name: authSession.name,
@@ -537,7 +613,7 @@ function App() {
   )
 
   const currentMarketInstruments = useMemo(
-    () => instruments.filter((item) => item.market === selectedMarket).slice(0, perMarketDetailLimit),
+    () => instruments.filter((item) => item.market === selectedMarket),
     [selectedMarket],
   )
 
@@ -688,6 +764,11 @@ function App() {
     watchlistRef.current = watchlist
   }, [watchlist])
 
+  const pendingLimitOrdersRef = useRef<PendingLimitOrder[]>([])
+  useEffect(() => {
+    pendingLimitOrdersRef.current = pendingLimitOrders
+  }, [pendingLimitOrders])
+
   const refreshOverviewQuotes = useCallback(async () => {
     const watchlistInstrumentObjects = watchlistRef.current
       .map((id) => instruments.find((item) => item.id === id))
@@ -695,10 +776,13 @@ function App() {
     const positionInstruments = userPortfolioRef.current
       .map((p) => instruments.find((item) => item.id === p.instrumentId))
       .filter((item): item is InstrumentConfig => Boolean(item))
+    const pendingOrderInstruments = pendingLimitOrdersRef.current
+      .map((order) => instruments.find((item) => item.id === order.instrumentId))
+      .filter((item): item is InstrumentConfig => Boolean(item))
     const overviewBase = instruments.filter((item) => overviewInstrumentIds.includes(item.id))
     const dedup = Array.from(
       new Map(
-        [...overviewBase, ...watchlistInstrumentObjects, ...positionInstruments].map((item) => [
+        [...overviewBase, ...watchlistInstrumentObjects, ...positionInstruments, ...pendingOrderInstruments].map((item) => [
           item.id,
           item,
         ]),
@@ -709,12 +793,14 @@ function App() {
   }, [])
 
   const refreshMarketQuotes = useCallback(async (marketId: MarketTabId) => {
-    const targets = instruments
-      .filter((item) => item.market === marketId)
-      .slice(0, perMarketDetailLimit)
+    const targets = instruments.filter((item) => item.market === marketId)
     const data = await fetchQuotes(targets)
     setQuotes(data)
   }, [])
+
+  useEffect(() => {
+    void refreshOverviewQuotes()
+  }, [pendingLimitOrders.length, refreshOverviewQuotes])
 
   const syncMarketData = useCallback(
     async (marketId: MarketTabId) => {
@@ -891,6 +977,7 @@ function App() {
   const runBotTick = useCallback(async () => {
     const universe = botUniverseRef.current
     const config = botConfigRef.current
+    const currentState = botStateRef.current
     if (universe.length === 0) {
       setBotStatus({
         tone: 'warn',
@@ -899,6 +986,20 @@ function App() {
             ? 'Portföy modunda taranacak varlık yok. Önce portföyünden trade bot cüzdanına varlık aktar.'
             : 'Tarama yapılacak varlık yok. Watchlist ekle veya varsayılanlar yüklensin.',
         at: new Date().toISOString(),
+      })
+      return
+    }
+
+    if (config.fundingMode === 'wallet' && currentState.cash <= 0 && currentState.positions.length === 0) {
+      setBotStatus({
+        tone: 'warn',
+        text: 'Bot cüzdanında bakiye yok. İşlem için önce bot cüzdanına para aktar.',
+        at: new Date().toISOString(),
+      })
+      pushActivity({
+        kind: 'system',
+        title: 'İşlem engellendi',
+        detail: 'Bot cüzdanı boş olduğu için tarama başlatılmadı.',
       })
       return
     }
@@ -962,6 +1063,15 @@ function App() {
       let executedQty = 0
 
       if (decision.decision === 'buy') {
+        const allocationPlan = previewBuyAllocation(nextState, { ...config, strategy: 'ai' })
+        if (allocationPlan.ok) {
+          pushActivity({
+            kind: 'decision',
+            title: `${instrument.symbol}: İşleme alınan tutar planı`,
+            detail: `Brüt $${allocationPlan.grossAllocation.toFixed(2)} · Net $${allocationPlan.netAllocation.toFixed(2)}`,
+            symbol: instrument.symbol,
+          })
+        }
         const result = executeBuy(nextState, instrument, livePrice, { ...config, strategy: 'ai' }, decision)
         nextState = result.state
         message = result.message
@@ -1080,24 +1190,134 @@ function App() {
     })
   }, [pushActivity])
 
-  const handleAddBotCash = useCallback(
-    (amount: number) => {
-      if (!Number.isFinite(amount) || amount <= 0) {
-        return
+  const handleBotCashTransfer = useCallback(
+    (request: BotCashTransferRequest): { ok: boolean; message: string } => {
+      const grossAmount = request.amount
+      if (!Number.isFinite(grossAmount) || grossAmount <= 0) {
+        return { ok: false, message: 'Geçerli bir tutar girin.' }
+      }
+
+      const feeRate = request.source === 'external_topup' ? 0.0025 : 0
+      const feeAmount = Number((grossAmount * feeRate).toFixed(2))
+      const netAmount = Math.max(0, Number((grossAmount - feeAmount).toFixed(2)))
+      const feeLabel = feeAmount > 0 ? ` (ücret: $${feeAmount.toFixed(2)})` : ''
+
+      if (request.direction === 'in') {
+        if (request.source === 'portfolio_cash') {
+          if (grossAmount > withdrawableCash) {
+            return { ok: false, message: 'Portföy çekilebilir bakiye yetersiz.' }
+          }
+          setWithdrawableCash((current) => current - grossAmount)
+        }
+
+        setBotState((current) => ({
+          ...current,
+          cash: current.cash + netAmount,
+          initialCash: current.initialCash + netAmount,
+        }))
+
+        const detail =
+          request.source === 'portfolio_cash'
+            ? `$${grossAmount.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} portföy nakdinden bot cüzdanına aktarıldı${feeLabel}.`
+            : `$${grossAmount.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} dış bakiye yüklemesi bot cüzdanına geçti${feeLabel}.`
+
+        setBotStatus({
+          tone: 'ok',
+          text: `Transfer tamamlandı: +$${netAmount.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}`,
+          at: new Date().toISOString(),
+        })
+        pushActivity({
+          kind: 'system',
+          title: 'Bot cüzdanına transfer',
+          detail,
+        })
+
+        if (authSession?.id) {
+          const payload = {
+            direction: 'in' as const,
+            source: request.source,
+            amount: grossAmount,
+            feeAmount,
+            netAmount,
+            currency: request.currency,
+            quotePair: request.quotePair,
+            quoteMode: request.quoteMode,
+            exchangeRate: request.exchangeRate,
+            convertedAmount: request.convertedAmount,
+            note: request.note,
+          }
+          void addBotWalletTransfer(authSession.id, payload).then((saved) => {
+            if (!saved) return
+            setBotWalletTransfers((current) => [saved, ...current].slice(0, 120))
+          })
+        }
+
+        return { ok: true, message: detail }
+      }
+
+      if (request.source !== 'portfolio_withdraw') {
+        return { ok: false, message: 'Bu transfer türü desteklenmiyor.' }
+      }
+
+      if (
+        request.currency !== 'USD' &&
+        (!Number.isFinite(request.exchangeRate ?? Number.NaN) || (request.exchangeRate ?? 0) <= 0)
+      ) {
+        return {
+          ok: false,
+          message: `${request.currency} için anlık kur verisi alınamadı. Lütfen tekrar dene.`,
+        }
+      }
+
+      if (grossAmount > botState.cash) {
+        return { ok: false, message: 'Bot cüzdanında yeterli nakit yok.' }
       }
 
       setBotState((current) => ({
         ...current,
-        cash: current.cash + amount,
-        initialCash: current.initialCash + amount,
+        cash: current.cash - grossAmount,
       }))
+      setWithdrawableCash((current) => current + netAmount)
+
+      const detail = `$${grossAmount.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} bot cüzdanından portföye geri aktarıldı${feeLabel}.`
+      const convertedDetail =
+        request.currency !== 'USD' && Number.isFinite(request.convertedAmount)
+          ? ` ≈ ${request.convertedAmount?.toLocaleString('tr-TR', { maximumFractionDigits: 2 })} ${request.currency}`
+          : ''
+      setBotStatus({
+        tone: 'ok',
+        text: `Transfer tamamlandı: Portföye +$${netAmount.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}${convertedDetail}`,
+        at: new Date().toISOString(),
+      })
       pushActivity({
         kind: 'system',
-        title: 'Bot bakiyesi eklendi',
-        detail: `$${amount.toLocaleString('tr-TR', { maximumFractionDigits: 0 })} bot cüzdanına eklendi.`,
+        title: 'Bot cüzdanından çıkış',
+        detail,
       })
+
+      if (authSession?.id) {
+        const payload = {
+          direction: 'out' as const,
+          source: 'portfolio_withdraw' as const,
+            amount: grossAmount,
+            feeAmount,
+            netAmount,
+            currency: request.currency,
+            quotePair: request.quotePair,
+            quoteMode: request.quoteMode,
+            exchangeRate: request.exchangeRate,
+            convertedAmount: request.convertedAmount,
+            note: request.note,
+          }
+          void addBotWalletTransfer(authSession.id, payload).then((saved) => {
+            if (!saved) return
+            setBotWalletTransfers((current) => [saved, ...current].slice(0, 120))
+        })
+      }
+
+      return { ok: true, message: detail }
     },
-    [pushActivity],
+    [authSession?.id, botState.cash, pushActivity, withdrawableCash],
   )
 
   const handleBotStart = useCallback(() => {
@@ -1105,6 +1325,27 @@ function App() {
   }, [])
 
   const handleBotStartConfirm = useCallback(() => {
+    if (botConfig.fundingMode === 'wallet' && botState.cash <= 0 && botState.positions.length === 0) {
+      setBotStatus({
+        tone: 'warn',
+        text: 'Bot cüzdanında bakiye yok. Başlatmadan önce cüzdana bakiye ekleyin.',
+        at: new Date().toISOString(),
+      })
+      setShowBotConfigModal(false)
+      return
+    }
+    if (botConfig.fundingMode === 'wallet' && botState.positions.length === 0) {
+      const allocationCheck = previewBuyAllocation(botState, { ...botConfig, strategy: 'ai' })
+      if (!allocationCheck.ok) {
+        setBotStatus({
+          tone: 'warn',
+          text: allocationCheck.reason ?? 'İşleme alınacak tutar ayarları geçersiz.',
+          at: new Date().toISOString(),
+        })
+        setShowBotConfigModal(false)
+        return
+      }
+    }
     setShowBotConfigModal(false)
     setBotRunning(true)
     pushActivity({
@@ -1112,7 +1353,7 @@ function App() {
       title: 'Bot başlatıldı',
       detail: `Tarama döngüsü her ${botConfig.intervalSeconds} saniyede tetiklenecek.`,
     })
-  }, [botConfig.intervalSeconds, pushActivity])
+  }, [botConfig.fundingMode, botConfig.intervalSeconds, botState.cash, botState.positions.length, pushActivity])
 
   const handleBotStop = useCallback(() => {
     setBotRunning(false)
@@ -1171,6 +1412,114 @@ function App() {
     },
     [authSession?.id],
   )
+
+  const recordSellCash = useCallback((amount: number) => {
+    if (!Number.isFinite(amount) || amount <= 0) return
+    setWithdrawableCash((current) => current + amount)
+  }, [])
+
+  const withdrawCash = useCallback((amount: number) => {
+    if (!Number.isFinite(amount) || amount <= 0) return false
+    let success = false
+    setWithdrawableCash((current) => {
+      if (amount > current) return current
+      success = true
+      return current - amount
+    })
+    if (success) {
+      setWithdrawnCashTotal((current) => current + amount)
+    }
+    return success
+  }, [])
+
+  const addPendingLimitOrder = useCallback(
+    (
+      order: Omit<PendingLimitOrder, 'id' | 'createdAt'>,
+    ) => {
+      const userId = authSession?.id
+      const tmpId = `pending-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      const localOrder: PendingLimitOrder = {
+        ...order,
+        id: tmpId,
+        createdAt: new Date().toISOString(),
+      }
+
+      setPendingLimitOrders((current) => [localOrder, ...current].slice(0, 100))
+
+      if (userId) {
+        void dbAddPendingLimitOrder(userId, {
+          instrumentId: order.instrumentId,
+          symbol: order.symbol,
+          label: order.label,
+          market: order.market,
+          quantity: order.quantity,
+          limitPrice: order.limitPrice,
+          commissionRate: order.commissionRate,
+        }).then((saved) => {
+          if (!saved) return
+          setPendingLimitOrders((current) =>
+            current.map((item) =>
+              item.id === tmpId
+                ? {
+                    ...item,
+                    id: saved.id,
+                    createdAt: saved.createdAt,
+                  }
+                : item,
+            ),
+          )
+        })
+      }
+    },
+    [authSession?.id],
+  )
+
+  const removePendingLimitOrder = useCallback(
+    (orderId: string) => {
+      const userId = authSession?.id
+      if (userId) void dbDeletePendingLimitOrder(userId, orderId)
+      setPendingLimitOrders((current) => current.filter((item) => item.id !== orderId))
+    },
+    [authSession?.id],
+  )
+
+  useEffect(() => {
+    if (pendingLimitOrders.length === 0) return
+
+    const fillable = pendingLimitOrders.filter((order) => {
+      const quote = quoteMap.get(order.instrumentId)
+      const livePrice = quote?.price ?? null
+      return livePrice !== null && livePrice <= order.limitPrice
+    })
+
+    if (fillable.length === 0) return
+
+    setPendingLimitOrders((current) => {
+      const toFill = new Set(fillable.map((item) => item.id))
+      return current.filter((item) => !toFill.has(item.id))
+    })
+
+    fillable.forEach((order) => {
+      const effectiveUnitCost = order.limitPrice * (1 + order.commissionRate / 100)
+      const currentPosition = userPortfolioRef.current.find(
+        (item) => item.instrumentId === order.instrumentId,
+      )
+      const currentQty = currentPosition?.quantity ?? 0
+      const currentAvg = currentPosition?.averageCost ?? 0
+      const nextQty = currentQty + order.quantity
+      const nextAvg =
+        nextQty > 0
+          ? (currentQty * currentAvg + order.quantity * effectiveUnitCost) / nextQty
+          : effectiveUnitCost
+
+      upsertUserPosition(order.instrumentId, nextQty, nextAvg)
+
+      const userId = authSession?.id
+      if (userId) {
+        void dbDeletePendingLimitOrder(userId, order.id)
+      }
+    })
+  }, [authSession?.id, pendingLimitOrders, quoteMap, upsertUserPosition])
 
   const addSavedNote = useCallback(
     (instrument: InstrumentConfig, text: string) => {
@@ -1322,6 +1671,7 @@ function App() {
     failedQuotes,
     loadedQuotesCount,
     overviewQuoteMap,
+    liveQuoteByInstrument: quoteMap,
     onSelectMarket: handleSelectMarket,
     onSelectInstrument: handleSelectInstrument,
     onOpenAsset: handleOpenAsset,
@@ -1330,15 +1680,23 @@ function App() {
     profile,
     setProfile,
     watchlistInstruments,
+    allInstruments: instruments,
     watchlistQuotes,
     portfolioPositions,
     portfolioMarketValue,
     portfolioUnrealized,
     portfolioUnrealizedPct,
+    withdrawableCash,
+    withdrawnCashTotal,
+    pendingLimitOrders,
     savedNotes,
     priceAlerts,
     upsertUserPosition,
     removeUserPosition,
+    recordSellCash,
+    withdrawCash,
+    addPendingLimitOrder,
+    removePendingLimitOrder,
     addSavedNote,
     removeSavedNote,
     addPriceAlert,
@@ -1452,7 +1810,7 @@ function App() {
               rel="noopener noreferrer"
             >
               <Settings size={18} />
-              <span>Admin Panel ↗</span>
+              <span>Admin Panel ?</span>
             </a>
           )}
           <button
@@ -1604,10 +1962,7 @@ function App() {
             <Route path="/piyasalar" element={<MarketsPage {...sharedPageProps} />} />
             <Route path="/watchlist" element={<WatchlistPage {...sharedPageProps} />} />
             <Route path="/varlik" element={<AssetPage {...sharedPageProps} />} />
-            <Route
-              path="/portfoy"
-              element={<PortfolioPage {...sharedPageProps} state={botStateForView} />}
-            />
+            <Route path="/portfoy" element={<PortfolioPage {...sharedPageProps} />} />
             <Route path="/bildirimler" element={<AlertsPage {...sharedPageProps} />} />
             <Route path="/egitim" element={<LearnPage />} />
             <Route
@@ -1624,13 +1979,14 @@ function App() {
                   activity={botActivity}
                   universe={botUniverse}
                   portfolioTransferItems={portfolioPositions}
-                  watchlistCount={watchlistInstruments.length}
                   quoteMap={quoteMap}
+                  portfolioCash={withdrawableCash}
+                  walletTransfers={botWalletTransfers}
                   onStart={handleBotStart}
                   onStop={handleBotStop}
                   onRunOnce={() => void runBotTick()}
                   onReset={handleBotReset}
-                  onAddCash={handleAddBotCash}
+                  onCashTransfer={handleBotCashTransfer}
                   onMovePortfolioToBot={handleMovePortfolioToBot}
                   onMoveBotToPortfolio={handleMoveBotToPortfolio}
                   showConfigModal={showBotConfigModal}
@@ -1676,6 +2032,7 @@ type SharedPageProps = {
   failedQuotes: QuoteData[]
   loadedQuotesCount: number
   overviewQuoteMap: Map<MarketTabId, QuoteData>
+  liveQuoteByInstrument: Map<string, QuoteData>
   onSelectMarket: (marketId: MarketTabId) => void
   onSelectInstrument: (instrumentId: string) => void
   onOpenAsset: (instrumentId: string) => void
@@ -1684,15 +2041,23 @@ type SharedPageProps = {
   profile: Profile
   setProfile: (profile: Profile) => void
   watchlistInstruments: InstrumentConfig[]
+  allInstruments: InstrumentConfig[]
   watchlistQuotes: Array<{ instrument: InstrumentConfig; quote: QuoteData | null }>
   portfolioPositions: PortfolioPosition[]
   portfolioMarketValue: number
   portfolioUnrealized: number
   portfolioUnrealizedPct: number
+  withdrawableCash: number
+  withdrawnCashTotal: number
+  pendingLimitOrders: PendingLimitOrder[]
   savedNotes: SavedNote[]
   priceAlerts: PriceAlert[]
   upsertUserPosition: (instrumentId: string, quantity: number, averageCost: number) => void
   removeUserPosition: (instrumentId: string) => void
+  recordSellCash: (amount: number) => void
+  withdrawCash: (amount: number) => boolean
+  addPendingLimitOrder: (order: Omit<PendingLimitOrder, 'id' | 'createdAt'>) => void
+  removePendingLimitOrder: (orderId: string) => void
   addSavedNote: (instrument: InstrumentConfig, text: string) => void
   removeSavedNote: (noteId: string) => void
   addPriceAlert: (instrument: InstrumentConfig, price: number) => void
@@ -1724,6 +2089,8 @@ function DashboardPage({
   portfolioMarketValue,
   portfolioUnrealized,
   portfolioUnrealizedPct,
+  savedNotes,
+  priceAlerts,
   profile,
   onOpenAsset,
   onSelectMarket,
@@ -1738,6 +2105,8 @@ function DashboardPage({
   const dailyLow = assetSnapshot.candles.length
     ? Math.min(...assetSnapshot.candles.slice(-1).map((c) => c.low))
     : null
+  const latestNotes = savedNotes.slice(0, 3)
+  const latestAlerts = priceAlerts.slice(0, 3)
 
   return (
     <div className="page-stack">
@@ -1924,6 +2293,74 @@ function DashboardPage({
         <article className="card">
           <header className="card-head">
             <div>
+              <p className="eyebrow">Hatırlatmalar</p>
+              <h3>Alarmlar ve notlar</h3>
+            </div>
+            <span className="muted small">{latestAlerts.length + latestNotes.length} kayıt</span>
+          </header>
+
+          {latestAlerts.length === 0 && latestNotes.length === 0 ? (
+            <div className="empty-block">
+              <Bell size={24} />
+              <strong>Hatırlatma yok</strong>
+              <p>Varlık sayfasında alarm ya da not eklediğinde burada görünür.</p>
+            </div>
+          ) : (
+            <div className="overview-reminders">
+              {latestAlerts.length > 0 && (
+                <div className="overview-reminder-group">
+                  <p className="muted small">Fiyat alarmları</p>
+                  <ul className="mini-list">
+                    {latestAlerts.map((alert) => (
+                      <li key={alert.id} className="mini-list-row">
+                        <div>
+                          <strong>{alert.symbol} · {formatNumber(alert.price)}</strong>
+                          <small>{formatTime(alert.createdAt)}</small>
+                        </div>
+                        <button
+                          type="button"
+                          className="link-button"
+                          onClick={() => onOpenAsset(alert.instrumentId)}
+                        >
+                          Aç
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {latestNotes.length > 0 && (
+                <div className="overview-reminder-group">
+                  <p className="muted small">Kişisel notlar</p>
+                  <ul className="note-list compact">
+                    {latestNotes.map((entry) => (
+                      <li key={entry.id} className="note-list-row">
+                        <p>{entry.text}</p>
+                        <footer>
+                          <small>
+                            {entry.symbol} · {formatTime(entry.createdAt)}
+                          </small>
+                          <button
+                            type="button"
+                            className="link-button"
+                            onClick={() => onOpenAsset(entry.instrumentId)}
+                          >
+                            Aç
+                          </button>
+                        </footer>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </article>
+
+        <article className="card">
+          <header className="card-head">
+            <div>
               <p className="eyebrow">Yükselenler</p>
               <h3>En iyi performans</h3>
             </div>
@@ -2094,7 +2531,8 @@ function WatchlistPage({
             <p className="eyebrow">Favoriler</p>
             <h2>Watchlist</h2>
             <p className="muted">
-              Takip ettiğin varlıklar tarayıcına yerel olarak kaydedilir. Yıldıza tıklayarak çıkar.
+              Takip ettiğin varlıklar hesabına kaydedilir ve giriş yaptığın tüm cihazlarda aynı
+              watchlist görünür.
             </p>
           </div>
           <span className="muted">{watchlistQuotes.length} varlık</span>
@@ -2142,7 +2580,7 @@ function AssetPage({
   setAlertPrice,
   toggleWatchlist,
   isInWatchlist,
-  currentMarketInstruments,
+  allInstruments,
   onSelectInstrument,
   onOpenAsset,
   portfolioPositions,
@@ -2290,9 +2728,9 @@ function AssetPage({
         </div>
 
         <aside className="asset-hero-side">
-          <p className="eyebrow">Aynı piyasadan</p>
+          <p className="eyebrow">Tüm varlıklar</p>
           <ul className="symbol-mini-list">
-            {currentMarketInstruments.map((item) => (
+            {allInstruments.map((item) => (
               <li key={item.id}>
                 <button
                   type="button"
@@ -2300,7 +2738,7 @@ function AssetPage({
                   onClick={() => onSelectInstrument(item.id)}
                 >
                   <strong>{item.symbol}</strong>
-                  <span>{item.label}</span>
+                  <span>{item.label} · {item.market.toUpperCase()}</span>
                 </button>
               </li>
             ))}
@@ -2675,47 +3113,278 @@ function AssetPage({
 }
 
 function PortfolioPage({
+  selectedMarket,
+  onSelectMarket,
+  allInstruments,
+  liveQuoteByInstrument,
   portfolioPositions,
   portfolioMarketValue,
   portfolioUnrealized,
   portfolioUnrealizedPct,
+  withdrawableCash,
+  withdrawnCashTotal,
+  pendingLimitOrders,
   profile,
   onOpenAsset,
-  overviewQuoteMap,
   upsertUserPosition,
-  state,
-}: SharedPageProps & { state: BotState }) {
-  const [selectedInstrumentId, setSelectedInstrumentId] = useState<string>('')
-  const [quantity, setQuantity] = useState('')
-  const [cost, setCost] = useState('')
+  removeUserPosition,
+  recordSellCash,
+  withdrawCash,
+  addPendingLimitOrder,
+  removePendingLimitOrder,
+}: SharedPageProps) {
+  type WizardStep = 1 | 2 | 3 | 4
+  type PortfolioMetric = 'value' | 'weight' | 'pnl'
+  type PortfolioSort = 'value_desc' | 'pnl_desc' | 'pnl_asc'
+  type MarketFilter = 'all' | MarketTabId
 
-  const selectedInstrument = instruments.find((i) => i.id === selectedInstrumentId)
-  const liveQuote = selectedInstrument ? overviewQuoteMap.get(selectedInstrument.market) : null
-  const livePrice = liveQuote?.price ?? null
+  const [wizardStep, setWizardStep] = useState<WizardStep>(1)
+  const [purchaseMarket, setPurchaseMarket] = useState<MarketTabId>(selectedMarket)
+  const [purchaseInstrumentId, setPurchaseInstrumentId] = useState('')
+  const [orderType, setOrderType] = useState<'market' | 'limit'>('market')
+  const [orderQuantity, setOrderQuantity] = useState('')
+  const [orderPrice, setOrderPrice] = useState('')
+  const [commissionRate, setCommissionRate] = useState('0.15')
+  const [searchTerm, setSearchTerm] = useState('')
 
-  function handleAddPosition(event: React.FormEvent) {
+  const [chartMarketFilter, setChartMarketFilter] = useState<MarketFilter>('all')
+  const [chartMetric, setChartMetric] = useState<PortfolioMetric>('value')
+  const [tableMarketFilter, setTableMarketFilter] = useState<MarketFilter>('all')
+  const [tableSort, setTableSort] = useState<PortfolioSort>('value_desc')
+  const [sellOrderPositionId, setSellOrderPositionId] = useState<string | null>(null)
+  const [sellOrderQuantity, setSellOrderQuantity] = useState('')
+  const [sellCommissionRate, setSellCommissionRate] = useState('0.15')
+  const [withdrawAmount, setWithdrawAmount] = useState('')
+  const commissionPresets: Record<MarketTabId, string> = {
+    abd: '0.15',
+    kripto: '0.10',
+    emtia: '0.12',
+    doviz: '0.08',
+  }
+
+  const purchaseInstrument =
+    allInstruments.find((instrument) => instrument.id === purchaseInstrumentId) ?? null
+  const purchaseQuote = purchaseInstrument
+    ? liveQuoteByInstrument.get(purchaseInstrument.id) ?? null
+    : null
+  const livePrice = purchaseQuote?.price ?? null
+
+  useEffect(() => {
+    if (orderType === 'market' && livePrice !== null) {
+      setOrderPrice(livePrice.toFixed(2))
+    }
+  }, [orderType, livePrice, purchaseInstrumentId])
+
+  useEffect(() => {
+    setCommissionRate(commissionPresets[purchaseMarket] ?? '0.15')
+  }, [purchaseMarket])
+
+  const selectedMarketLabel = useMemo(
+    () => marketTabs.find((item) => item.id === purchaseMarket)?.label ?? purchaseMarket.toUpperCase(),
+    [purchaseMarket],
+  )
+
+  const filteredInstruments = useMemo(() => {
+    const normalized = searchTerm.trim().toLowerCase()
+    return allInstruments
+      .filter((instrument) => instrument.market === purchaseMarket)
+      .filter((instrument) => {
+        if (!normalized) return true
+        return (
+          instrument.symbol.toLowerCase().includes(normalized) ||
+          instrument.label.toLowerCase().includes(normalized) ||
+          instrument.sector.toLowerCase().includes(normalized)
+        )
+      })
+  }, [allInstruments, purchaseMarket, searchTerm])
+
+  const quantityValue = parseFloat(orderQuantity.replace(',', '.'))
+  const priceValue = parseFloat(orderPrice.replace(',', '.'))
+  const commissionRateValue = parseFloat(commissionRate.replace(',', '.'))
+  const isValidQuantity = Number.isFinite(quantityValue) && quantityValue > 0
+  const isValidPrice = Number.isFinite(priceValue) && priceValue > 0
+  const isValidCommission = Number.isFinite(commissionRateValue) && commissionRateValue >= 0
+  const grossAmount = isValidQuantity && isValidPrice ? quantityValue * priceValue : 0
+  const commissionAmount = isValidCommission ? grossAmount * (commissionRateValue / 100) : 0
+  const totalAmount = grossAmount + commissionAmount
+  const effectiveUnitCost =
+    isValidQuantity && totalAmount > 0 ? totalAmount / quantityValue : null
+  const canPreview =
+    Boolean(purchaseInstrument) && isValidQuantity && isValidPrice && isValidCommission
+
+  const existingPosition = purchaseInstrument
+    ? portfolioPositions.find((position) => position.instrument.id === purchaseInstrument.id) ?? null
+    : null
+
+  const chartPositions = useMemo(
+    () =>
+      portfolioPositions.filter(
+        (position) =>
+          chartMarketFilter === 'all' || position.instrument.market === chartMarketFilter,
+      ),
+    [chartMarketFilter, portfolioPositions],
+  )
+  const chartTotalValue = chartPositions.reduce((sum, position) => sum + position.marketValue, 0)
+  const maxAbsolutePnl = Math.max(
+    ...chartPositions.map((position) => Math.abs(position.pnl)),
+    0.0001,
+  )
+
+  const tablePositions = useMemo(() => {
+    const filtered = portfolioPositions.filter(
+      (position) =>
+        tableMarketFilter === 'all' || position.instrument.market === tableMarketFilter,
+    )
+    return filtered.sort((a, b) => {
+      if (tableSort === 'pnl_desc') return b.pnl - a.pnl
+      if (tableSort === 'pnl_asc') return a.pnl - b.pnl
+      return b.marketValue - a.marketValue
+    })
+  }, [portfolioPositions, tableMarketFilter, tableSort])
+
+  const sellPosition = sellOrderPositionId
+    ? portfolioPositions.find((position) => position.id === sellOrderPositionId) ?? null
+    : null
+  const sellLivePrice = sellPosition?.price ?? null
+  const sellQtyValue = parseFloat(sellOrderQuantity.replace(',', '.'))
+  const sellCommissionValue = parseFloat(sellCommissionRate.replace(',', '.'))
+  const sellValidQty =
+    Boolean(sellPosition) &&
+    Number.isFinite(sellQtyValue) &&
+    sellQtyValue > 0 &&
+    sellQtyValue <= (sellPosition?.quantity ?? 0)
+  const sellValidCommission = Number.isFinite(sellCommissionValue) && sellCommissionValue >= 0
+  const grossSellAmount = sellValidQty && sellLivePrice !== null ? sellQtyValue * sellLivePrice : 0
+  const sellCommissionAmount =
+    sellValidQty && sellValidCommission ? grossSellAmount * (sellCommissionValue / 100) : 0
+  const netSellAmount = Math.max(0, grossSellAmount - sellCommissionAmount)
+  const withdrawValue = parseFloat(withdrawAmount.replace(',', '.'))
+  const canWithdraw =
+    Number.isFinite(withdrawValue) && withdrawValue > 0 && withdrawValue <= withdrawableCash
+
+  function openSellPanel(position: PortfolioPosition) {
+    setSellOrderPositionId(position.id)
+    setSellOrderQuantity('')
+    setSellCommissionRate(commissionPresets[position.instrument.market] ?? '0.15')
+  }
+
+  function closeSellPanel() {
+    setSellOrderPositionId(null)
+    setSellOrderQuantity('')
+  }
+
+  function submitSellOrder(event: FormEvent) {
     event.preventDefault()
-    if (!selectedInstrument) return
-    const qty = parseFloat(quantity.replace(',', '.'))
-    const costVal = parseFloat(cost.replace(',', '.'))
-    if (Number.isFinite(qty) && Number.isFinite(costVal) && qty > 0 && costVal > 0) {
-      upsertUserPosition(selectedInstrument.id, qty, costVal)
-      setSelectedInstrumentId('')
-      setQuantity('')
-      setCost('')
+    if (!sellPosition || !sellValidQty || !sellValidCommission) return
+
+    const remainingQty = sellPosition.quantity - sellQtyValue
+    if (remainingQty <= 0) {
+      removeUserPosition(sellPosition.id)
+    } else {
+      upsertUserPosition(sellPosition.id, remainingQty, sellPosition.averageCost)
     }
+
+    if (netSellAmount > 0) {
+      recordSellCash(netSellAmount)
+    }
+    closeSellPanel()
   }
 
-  function handleCloseForm() {
-    setSelectedInstrumentId('')
-    setQuantity('')
-    setCost('')
+  function submitWithdraw(event: FormEvent) {
+    event.preventDefault()
+    const amount = parseFloat(withdrawAmount.replace(',', '.'))
+    if (!Number.isFinite(amount) || amount <= 0) return
+    const ok = withdrawCash(amount)
+    if (ok) setWithdrawAmount('')
   }
 
-  function handleQuickFillPrice() {
-    if (livePrice !== null) {
-      setCost(livePrice.toFixed(2))
+  function metricValue(position: PortfolioPosition): number {
+    if (chartMetric === 'weight') {
+      if (chartTotalValue === 0) return 0
+      return (position.marketValue / chartTotalValue) * 100
     }
+    if (chartMetric === 'pnl') {
+      return position.pnl
+    }
+    return position.marketValue
+  }
+
+  function metricWidth(position: PortfolioPosition): number {
+    if (chartMetric === 'weight') {
+      return Math.max(4, metricValue(position))
+    }
+    if (chartMetric === 'pnl') {
+      return Math.max(4, (Math.abs(position.pnl) / maxAbsolutePnl) * 100)
+    }
+    const maxValue = Math.max(...chartPositions.map((item) => item.marketValue), 0.0001)
+    return Math.max(4, (position.marketValue / maxValue) * 100)
+  }
+
+  function metricLabel(position: PortfolioPosition): string {
+    if (chartMetric === 'weight') {
+      return `${metricValue(position).toFixed(2)}%`
+    }
+    if (chartMetric === 'pnl') {
+      return `${formatSignedCurrency(position.pnl, profile.preferredCurrency)} · ${formatPercent(position.pnlPct)}`
+    }
+    return formatCurrencyValue(position.marketValue, profile.preferredCurrency)
+  }
+
+  function resetWizard() {
+    setWizardStep(1)
+    setPurchaseInstrumentId('')
+    setOrderType('market')
+    setOrderQuantity('')
+    setOrderPrice('')
+    setCommissionRate('0.15')
+    setSearchTerm('')
+  }
+
+  function handlePickMarket(marketId: MarketTabId) {
+    setPurchaseMarket(marketId)
+    setPurchaseInstrumentId('')
+    setSearchTerm('')
+    onSelectMarket(marketId)
+  }
+
+  function handleSelectPurchaseInstrument(instrumentId: string) {
+    setPurchaseInstrumentId(instrumentId)
+    setWizardStep(3)
+  }
+
+  function goToPreview(event: React.FormEvent) {
+    event.preventDefault()
+    if (!canPreview) return
+    setWizardStep(4)
+  }
+
+  function completePurchase() {
+    if (!purchaseInstrument || !effectiveUnitCost || !isValidQuantity) return
+
+    if (orderType === 'limit') {
+      addPendingLimitOrder({
+        instrumentId: purchaseInstrument.id,
+        symbol: purchaseInstrument.symbol,
+        label: purchaseInstrument.label,
+        market: purchaseInstrument.market,
+        quantity: quantityValue,
+        limitPrice: priceValue,
+        commissionRate: commissionRateValue,
+      })
+      resetWizard()
+      return
+    }
+
+    const currentQty = existingPosition?.quantity ?? 0
+    const currentCost = existingPosition?.averageCost ?? 0
+    const nextQuantity = currentQty + quantityValue
+    const nextAverageCost =
+      nextQuantity > 0
+        ? (currentQty * currentCost + quantityValue * effectiveUnitCost) / nextQuantity
+        : effectiveUnitCost
+
+    upsertUserPosition(purchaseInstrument.id, nextQuantity, nextAverageCost)
+    resetWizard()
   }
 
   return (
@@ -2729,8 +3398,8 @@ function PortfolioPage({
           </p>
           <div className="portfolio-stats">
             <div>
-              <span>Bakiye</span>
-              <strong>{formatCurrencyValue(demoBalance, profile.preferredCurrency)}</strong>
+              <span>Çekilebilir bakiye</span>
+              <strong>{formatCurrencyValue(withdrawableCash, profile.preferredCurrency)}</strong>
             </div>
             <div>
               <span>Piyasa değeri</span>
@@ -2749,8 +3418,8 @@ function PortfolioPage({
               </strong>
             </div>
             <div>
-              <span>Trade Bot Nakiti</span>
-              <strong>${state.cash.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}</strong>
+              <span>Çekilen toplam</span>
+              <strong>{formatCurrencyValue(withdrawnCashTotal, profile.preferredCurrency)}</strong>
             </div>
           </div>
         </div>
@@ -2760,7 +3429,7 @@ function PortfolioPage({
             thickness={26}
             centerLabel="Toplam"
             centerValue={formatCompactNumber(portfolioMarketValue)}
-            slices={portfolioPositions.map((position) => ({
+            slices={chartPositions.map((position) => ({
               id: position.instrument.id,
               label: position.instrument.symbol,
               value: position.marketValue,
@@ -2776,98 +3445,313 @@ function PortfolioPage({
       <section className="card page-enter">
         <header className="card-head">
           <div>
-            <p className="eyebrow">Hızlı ekleme</p>
-            <h3>Piyasa varlıklarından seç</h3>
+            <p className="eyebrow">Satın alım akışı</p>
+            <h3>Adım adım portföye ekle</h3>
           </div>
-          <span className="muted">{instruments.length} varlık</span>
+          <span className="muted">{allInstruments.length} varlık</span>
         </header>
 
-        {selectedInstrument && livePrice !== null && (
-          <div className="quick-add-form">
-            <div className="quick-add-header">
-              <span>
-                <strong>{selectedInstrument.symbol}</strong>
-                <small>{selectedInstrument.label}</small>
-              </span>
-              <span className="quick-add-price">
-                <strong>{formatNumber(livePrice)}</strong>
-              </span>
-            </div>
+        <ol className="portfolio-stepper">
+          <li className={wizardStep === 1 ? 'is-active' : wizardStep > 1 ? 'is-done' : ''}>1. Piyasa</li>
+          <li className={wizardStep === 2 ? 'is-active' : wizardStep > 2 ? 'is-done' : ''}>2. Varlık</li>
+          <li className={wizardStep === 3 ? 'is-active' : wizardStep > 3 ? 'is-done' : ''}>3. Emir</li>
+          <li className={wizardStep === 4 ? 'is-active' : ''}>4. Onay</li>
+        </ol>
 
-            <form className="portfolio-edit-form" onSubmit={handleAddPosition}>
+        <div className="portfolio-wizard">
+          {wizardStep === 1 && (
+            <div className="wizard-step">
+              <p className="muted">Önce bir piyasa seç. Seçimle birlikte liste filtrelenir.</p>
+              <div className="market-tab-row">
+                {marketTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    className={purchaseMarket === tab.id ? 'market-tab is-active' : 'market-tab'}
+                    onClick={() => handlePickMarket(tab.id)}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              <div className="form-actions">
+                <button type="button" className="primary-button" onClick={() => setWizardStep(2)}>
+                  Devam et
+                </button>
+              </div>
+            </div>
+          )}
+
+          {wizardStep === 2 && (
+            <div className="wizard-step">
+              <div className="quick-add-header">
+                <span>
+                  <strong>{selectedMarketLabel} varlıkları</strong>
+                  <small>Arama yaparak hızlıca seçebilirsin.</small>
+                </span>
+                <input
+                  className="wizard-search"
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                  placeholder="Sembol veya ad ara"
+                />
+              </div>
+              {filteredInstruments.length === 0 ? (
+                <div className="empty-block">
+                  <Search size={22} />
+                  <strong>Eşleşen varlık bulunamadı</strong>
+                  <p>Arama metnini temizleyebilir veya başka bir piyasa seçebilirsin.</p>
+                </div>
+              ) : (
+                <ul className="asset-list">
+                  {filteredInstruments.map((instrument) => {
+                    const quote = liveQuoteByInstrument.get(instrument.id) ?? null
+                    return (
+                      <li key={instrument.id}>
+                        <button
+                          type="button"
+                          className="quick-add-item"
+                          onClick={() => handleSelectPurchaseInstrument(instrument.id)}
+                        >
+                          <span className="quick-add-symbol">
+                            <strong>{instrument.symbol}</strong>
+                            <small>{instrument.label}</small>
+                          </span>
+                          <span className="quick-add-info">
+                            <strong>{formatNumber(quote?.price ?? null)}</strong>
+                            <small className={getChangeClass(quote?.percentChange ?? null)}>
+                              {formatPercent(quote?.percentChange ?? null)}
+                            </small>
+                          </span>
+                          <span className="quick-add-trigger">
+                            <ChevronRight size={14} />
+                          </span>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+              <div className="form-actions">
+                <button type="button" className="ghost-button" onClick={() => setWizardStep(1)}>
+                  Geri
+                </button>
+              </div>
+            </div>
+          )}
+
+          {wizardStep === 3 && purchaseInstrument && (
+            <form className="wizard-step quick-add-form" onSubmit={goToPreview}>
+              <div className="quick-add-header">
+                <span>
+                  <strong>{purchaseInstrument.symbol}</strong>
+                  <small>{purchaseInstrument.label}</small>
+                </span>
+                <span className="quick-add-price">
+                  <strong>{formatNumber(livePrice)}</strong>
+                </span>
+              </div>
+
+              <div className="form-field">
+                <span>Emir tipi</span>
+                <select
+                  value={orderType}
+                  onChange={(event) => setOrderType(event.target.value as 'market' | 'limit')}
+                >
+                  <option value="market">Piyasa emri</option>
+                  <option value="limit">Limit emri</option>
+                </select>
+              </div>
+
               <div className="form-field">
                 <span>Adet</span>
                 <input
                   type="text"
                   inputMode="decimal"
-                  value={quantity}
-                  onChange={(event) => setQuantity(event.target.value)}
+                  value={orderQuantity}
+                  onChange={(event) => setOrderQuantity(event.target.value)}
                   placeholder="örn. 10.5"
                   required
-                  autoFocus
                 />
               </div>
 
               <div className="form-field">
-                <span>Ortalama maliyet</span>
+                <span>{orderType === 'market' ? 'Tahmini birim fiyat' : 'Limit fiyat'}</span>
                 <input
                   type="text"
                   inputMode="decimal"
-                  value={cost}
-                  onChange={(event) => setCost(event.target.value)}
-                  placeholder={livePrice.toFixed(2)}
+                  value={orderPrice}
+                  onChange={(event) => setOrderPrice(event.target.value)}
+                  placeholder={livePrice !== null ? livePrice.toFixed(2) : 'örn. 250.00'}
+                  required
                 />
-                {!cost && (
+                {livePrice !== null && (
                   <button
                     type="button"
                     className="link-button"
-                    onClick={handleQuickFillPrice}
+                    onClick={() => setOrderPrice(livePrice.toFixed(2))}
                   >
                     Canlı fiyatı kullan ({formatNumber(livePrice)})
                   </button>
                 )}
               </div>
 
+              <div className="form-field">
+                <span>Komisyon (%)</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={commissionRate}
+                  onChange={(event) => setCommissionRate(event.target.value)}
+                  placeholder="0.15"
+                />
+                <small className="muted small">
+                  Komisyon, işlem ücretidir. Maliyete eklenir ve ortalama alış fiyatını etkiler.
+                </small>
+              </div>
+
+              {existingPosition && (
+                <p className="muted small">
+                  Bu varlık portföyde mevcut: {existingPosition.quantity} adet · ortalama{' '}
+                  {formatNumber(existingPosition.averageCost)}. Satın alım sonrası ağırlıklı maliyetle
+                  güncellenecek.
+                </p>
+              )}
+
               <div className="form-actions">
-                <button type="submit" className="primary-button" disabled={!quantity || !cost}>
-                  <Plus size={14} /> Portföye ekle
+                <button type="button" className="ghost-button" onClick={() => setWizardStep(2)}>
+                  Geri
                 </button>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={handleCloseForm}
-                >
-                  İptal
+                <button type="submit" className="primary-button" disabled={!canPreview}>
+                  Önizlemeye geç
                 </button>
               </div>
             </form>
-          </div>
-        )}
+          )}
 
-        {!selectedInstrument && (
-          <ul className="asset-list">
-            {instruments.map((instrument) => {
-              const quote = overviewQuoteMap.get(instrument.market)
+          {wizardStep === 4 && purchaseInstrument && (
+            <div className="wizard-step purchase-confirm">
+              <div className="purchase-confirm-grid">
+                <div>
+                  <span>Varlık</span>
+                  <strong>{purchaseInstrument.symbol}</strong>
+                  <small>{purchaseInstrument.label}</small>
+                </div>
+                <div>
+                  <span>Emir tipi</span>
+                  <strong>{orderType === 'market' ? 'Piyasa emri' : 'Limit emri'}</strong>
+                </div>
+                <div>
+                  <span>Adet</span>
+                  <strong>{isValidQuantity ? quantityValue.toLocaleString('tr-TR') : '—'}</strong>
+                </div>
+                <div>
+                  <span>Birim fiyat</span>
+                  <strong>{isValidPrice ? formatNumber(priceValue) : '—'}</strong>
+                </div>
+                <div>
+                  <span>Komisyon</span>
+                  <strong>{isValidCommission ? `%${commissionRateValue.toFixed(2)}` : '—'}</strong>
+                </div>
+                <div>
+                  <span>Toplam tutar</span>
+                  <strong>{formatCurrencyValue(totalAmount, profile.preferredCurrency)}</strong>
+                </div>
+                <div>
+                  <span>Portföye yansıyacak maliyet</span>
+                  <strong>{formatNumber(effectiveUnitCost)}</strong>
+                </div>
+              </div>
+
+              <div className="form-actions">
+                <button type="button" className="ghost-button" onClick={() => setWizardStep(3)}>
+                  Emir düzenle
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={completePurchase}
+                  disabled={!canPreview || !effectiveUnitCost}
+                >
+                  <Save size={14} /> {orderType === 'limit' ? 'Limit emir oluştur' : 'Satın alımı tamamla'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="card page-enter">
+        <header className="card-head">
+          <div>
+            <p className="eyebrow">Bekleyen Emirler</p>
+            <h3>Limit emir takip paneli</h3>
+          </div>
+          <span className="muted">{pendingLimitOrders.length} aktif limit emir</span>
+        </header>
+
+        {pendingLimitOrders.length === 0 ? (
+          <div className="empty-block">
+            <Target size={24} />
+            <strong>Bekleyen limit emrin yok</strong>
+            <p>Limit emir verdiğinde gerçekleşene kadar burada izlersin.</p>
+          </div>
+        ) : (
+          <ul className="pending-order-list">
+            {pendingLimitOrders.map((order) => {
+              const live = liveQuoteByInstrument.get(order.instrumentId)?.price ?? null
+              const remainingAbs = live !== null ? live - order.limitPrice : null
+              const remainingPct =
+                live !== null && live !== 0 ? ((live - order.limitPrice) / live) * 100 : null
+              const isTriggered = live !== null && live <= order.limitPrice
+
               return (
-                <li key={instrument.id}>
+                <li key={order.id} className="pending-order-row">
                   <button
                     type="button"
-                    className="quick-add-item"
-                    onClick={() => setSelectedInstrumentId(instrument.id)}
+                    className="pending-order-main"
+                    onClick={() => onOpenAsset(order.instrumentId)}
                   >
-                    <span className="quick-add-symbol">
-                      <strong>{instrument.symbol}</strong>
-                      <small>{instrument.label}</small>
+                    <span>
+                      <strong>{order.symbol}</strong>
+                      <small>{order.label}</small>
                     </span>
-                    <span className="quick-add-info">
-                      <strong>{formatNumber(quote?.price ?? null)}</strong>
-                      <small className={getChangeClass(quote?.percentChange ?? null)}>
-                        {formatPercent(quote?.percentChange ?? null)}
-                      </small>
+                    <span>
+                      <small>Limit</small>
+                      <strong>{formatNumber(order.limitPrice)}</strong>
                     </span>
-                    <span className="quick-add-trigger">
-                      <Plus size={14} />
+                    <span>
+                      <small>Anlık</small>
+                      <strong>{formatNumber(live)}</strong>
                     </span>
+                    <span>
+                      <small>Kalan</small>
+                      {remainingAbs === null ? (
+                        <strong>—</strong>
+                      ) : (
+                        <strong className={isTriggered ? 'positive' : 'neutral-text'}>
+                          {formatSignedNumber(remainingAbs)} ({formatPercent(remainingPct)})
+                        </strong>
+                      )}
+                    </span>
+                    <span>
+                      <small>Adet</small>
+                      <strong>{order.quantity}</strong>
+                    </span>
+                    <span>
+                      <small>Durum</small>
+                      <strong className={isTriggered ? 'positive' : 'neutral-text'}>
+                        {isTriggered ? 'Eşikte' : 'Bekliyor'}
+                      </strong>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-mini"
+                    onClick={() => removePendingLimitOrder(order.id)}
+                    aria-label={`${order.symbol} limit emrini iptal et`}
+                  >
+                    <X size={14} />
                   </button>
                 </li>
               )
@@ -2879,18 +3763,244 @@ function PortfolioPage({
       <section className="card page-enter">
         <header className="card-head">
           <div>
+            <p className="eyebrow">Nakit İşlemleri</p>
+            <h3>Satış sonrası çekim</h3>
+          </div>
+        </header>
+        <form className="portfolio-cash-form" onSubmit={submitWithdraw}>
+          <div className="form-field">
+            <span>Çekim tutarı</span>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={withdrawAmount}
+              onChange={(event) => setWithdrawAmount(event.target.value)}
+              placeholder="örn. 1500"
+            />
+            <small className="muted small">
+              Sadece satışlardan oluşan çekilebilir bakiyeyi çekebilirsin.
+            </small>
+          </div>
+          <div className="form-actions">
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={!canWithdraw}
+            >
+              Nakit çek
+            </button>
+            <span className="muted small">
+              Kullanılabilir: {formatCurrencyValue(withdrawableCash, profile.preferredCurrency)}
+            </span>
+          </div>
+        </form>
+      </section>
+
+      <section className="card page-enter">
+        <header className="card-head">
+          <div>
+            <p className="eyebrow">Portföy analizi</p>
+            <h3>Grafikleri filtrele ve incele</h3>
+          </div>
+        </header>
+
+        <div className="portfolio-chart-toolbar">
+          <div className="market-tab-row">
+            <button
+              type="button"
+              className={chartMarketFilter === 'all' ? 'market-tab is-active' : 'market-tab'}
+              onClick={() => setChartMarketFilter('all')}
+            >
+              Tümü
+            </button>
+            {marketTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={chartMarketFilter === tab.id ? 'market-tab is-active' : 'market-tab'}
+                onClick={() => setChartMarketFilter(tab.id)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="market-tab-row">
+            <button
+              type="button"
+              className={chartMetric === 'value' ? 'market-tab is-active' : 'market-tab'}
+              onClick={() => setChartMetric('value')}
+            >
+              Değer
+            </button>
+            <button
+              type="button"
+              className={chartMetric === 'weight' ? 'market-tab is-active' : 'market-tab'}
+              onClick={() => setChartMetric('weight')}
+            >
+              Ağırlık
+            </button>
+            <button
+              type="button"
+              className={chartMetric === 'pnl' ? 'market-tab is-active' : 'market-tab'}
+              onClick={() => setChartMetric('pnl')}
+            >
+              P/L
+            </button>
+          </div>
+        </div>
+
+        {chartPositions.length === 0 ? (
+          <div className="empty-block">
+            <AreaChart size={24} />
+            <strong>Bu filtrede pozisyon yok</strong>
+            <p>Piyasa filtresini değiştirebilir veya yeni varlık ekleyebilirsin.</p>
+          </div>
+        ) : (
+          <div className="portfolio-analysis-grid">
+            <div className="portfolio-analysis-donut">
+              <DonutChart
+                size={220}
+                thickness={26}
+                centerLabel={chartMetric === 'weight' ? 'Ağırlık' : 'Toplam'}
+                centerValue={
+                  chartMetric === 'weight'
+                    ? '%100'
+                    : formatCompactNumber(chartPositions.reduce((sum, position) => sum + position.marketValue, 0))
+                }
+                slices={chartPositions.map((position) => ({
+                  id: position.instrument.id,
+                  label: position.instrument.symbol,
+                  value: chartMetric === 'pnl' ? Math.abs(position.pnl) : position.marketValue,
+                  color: position.color,
+                }))}
+                onSelect={(slice) => {
+                  if (slice.id) onOpenAsset(slice.id)
+                }}
+              />
+              <p className="muted small portfolio-edit-hint">
+                Dilime tıklayarak varlık detayına gidebilirsin.
+              </p>
+            </div>
+
+            <div className="portfolio-bar-chart">
+              {chartPositions.map((position) => (
+                <button
+                  key={position.instrument.id}
+                  type="button"
+                  className="portfolio-chart-row"
+                  onClick={() => onOpenAsset(position.instrument.id)}
+                >
+                  <span className="portfolio-chart-symbol">
+                    <strong>{position.instrument.symbol}</strong>
+                    <small>{position.instrument.label}</small>
+                  </span>
+                  <span className="portfolio-chart-track">
+                    <span
+                      className={chartMetric === 'pnl' && position.pnl < 0 ? 'bar-fill negative' : 'bar-fill'}
+                      style={{ width: `${metricWidth(position)}%`, background: position.color }}
+                    />
+                  </span>
+                  <span className="portfolio-chart-value">{metricLabel(position)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="card page-enter">
+        <header className="card-head">
+          <div>
             <p className="eyebrow">Pozisyonlar</p>
             <h3>Açık varlıklar</h3>
           </div>
+
+          <div className="portfolio-chart-toolbar">
+            <div className="market-tab-row">
+              <button
+                type="button"
+                className={tableMarketFilter === 'all' ? 'market-tab is-active' : 'market-tab'}
+                onClick={() => setTableMarketFilter('all')}
+              >
+                Tümü
+              </button>
+              {marketTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  className={tableMarketFilter === tab.id ? 'market-tab is-active' : 'market-tab'}
+                  onClick={() => setTableMarketFilter(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+            <select
+              className="portfolio-sort-select"
+              value={tableSort}
+              onChange={(event) => setTableSort(event.target.value as PortfolioSort)}
+            >
+              <option value="value_desc">Değere göre (yüksekten)</option>
+              <option value="pnl_desc">P/L (yüksekten)</option>
+              <option value="pnl_asc">P/L (düşükten)</option>
+            </select>
+          </div>
         </header>
-        {portfolioPositions.length === 0 ? (
+
+        {sellPosition && (
+          <form className="quick-add-form" onSubmit={submitSellOrder}>
+            <div className="quick-add-header">
+              <span>
+                <strong>{sellPosition.instrument.symbol} satış emri</strong>
+                <small>{sellPosition.instrument.label}</small>
+              </span>
+              <span className="quick-add-price">
+                <strong>{formatNumber(sellLivePrice)}</strong>
+              </span>
+            </div>
+            <div className="form-field">
+              <span>Satış adedi (maks {sellPosition.quantity})</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={sellOrderQuantity}
+                onChange={(event) => setSellOrderQuantity(event.target.value)}
+                placeholder="örn. 2"
+              />
+            </div>
+            <div className="form-field">
+              <span>Komisyon (%)</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={sellCommissionRate}
+                onChange={(event) => setSellCommissionRate(event.target.value)}
+                placeholder="0.15"
+              />
+              <small className="muted small">
+                Tahmini net satış: {formatCurrencyValue(netSellAmount, profile.preferredCurrency)}
+              </small>
+            </div>
+            <div className="form-actions">
+              <button type="submit" className="primary-button" disabled={!sellValidQty || !sellValidCommission}>
+                Satışı onayla
+              </button>
+              <button type="button" className="ghost-button" onClick={closeSellPanel}>
+                Vazgeç
+              </button>
+            </div>
+          </form>
+        )}
+
+        {tablePositions.length === 0 ? (
           <div className="empty-block">
             <Wallet size={26} />
             <strong>Portföyün boş</strong>
-            <p>Yukarıdaki form ile bir varlık ekleyerek başlayabilirsin.</p>
+            <p>Yukarıdaki satın alım akışı ile varlık ekleyerek başlayabilirsin.</p>
           </div>
         ) : (
-          <div className="positions-table">
+          <div className="positions-table portfolio-positions-table">
             <div className="positions-head">
               <span>Varlık</span>
               <span>Adet</span>
@@ -2898,32 +4008,65 @@ function PortfolioPage({
               <span>Anlık fiyat</span>
               <span>Değer</span>
               <span>P/L</span>
+              <span>İşlem</span>
             </div>
-            {portfolioPositions.map((position) => (
-              <button
-                key={position.id}
-                type="button"
-                className="positions-row"
-                onClick={() => onOpenAsset(position.id)}
-              >
-                <span className="positions-asset">
-                  <span className="positions-bullet" style={{ background: position.color }} />
-                  <span>
-                    <strong>{position.instrument.symbol}</strong>
-                    <small>{position.instrument.label}</small>
+            {tablePositions.map((position) => (
+              <div key={position.id} className="positions-row with-actions">
+                <button
+                  type="button"
+                  className="positions-row-main"
+                  onClick={() => onOpenAsset(position.id)}
+                >
+                  <span className="positions-asset">
+                    <span className="positions-bullet" style={{ background: position.color }} />
+                    <span>
+                      <strong>{position.instrument.symbol}</strong>
+                      <small>{position.instrument.label}</small>
+                    </span>
                   </span>
-                </span>
-                <span>{position.quantity}</span>
-                <span>{formatNumber(position.averageCost)}</span>
-                <span>{formatNumber(position.price)}</span>
-                <span>{formatCurrencyValue(position.marketValue, profile.preferredCurrency)}</span>
-                <span className={position.pnl >= 0 ? 'positive' : 'negative'}>
-                  {formatSignedNumber(position.pnl)} ({formatPercent(position.pnlPct)})
-                </span>
-              </button>
+                  <span>{position.quantity}</span>
+                  <span>{formatNumber(position.averageCost)}</span>
+                  <span>{formatNumber(position.price)}</span>
+                  <span>{formatCurrencyValue(position.marketValue, profile.preferredCurrency)}</span>
+                  <span className={position.pnl >= 0 ? 'positive' : 'negative'}>
+                    {formatSignedNumber(position.pnl)} ({formatPercent(position.pnlPct)})
+                  </span>
+                </button>
+                <div className="position-row-actions">
+                  <button
+                    type="button"
+                    className="icon-mini"
+                    onClick={() => openSellPanel(position)}
+                    aria-label={`${position.instrument.symbol} için satış emri oluştur`}
+                  >
+                    <TrendingDown size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-mini"
+                    onClick={() => removeUserPosition(position.id)}
+                    aria-label={`${position.instrument.symbol} pozisyonunu sil`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
         )}
+      </section>
+
+      <section className="card page-enter">
+        <header className="card-head">
+          <div>
+            <p className="eyebrow">Özet</p>
+            <h3>Portföy performansı</h3>
+          </div>
+        </header>
+        <p className="muted">
+          Portföy kayıtları kullanıcı hesabına özel olarak saklanır. Satın alım adımlarında onaylanan
+          her işlem ilgili kullanıcı için Supabase üzerinde güncellenir.
+        </p>
       </section>
     </div>
   )
@@ -3022,12 +4165,12 @@ function readingTime(paragraphs: string[]): number {
 
 
 const CATEGORY_META: Record<string, { gradient: [string, string]; icon: string }> = {
-  'teknik-analiz': { gradient: ['#2563eb', '#0ea5e9'], icon: '📈' },
-  'risk-yonetimi': { gradient: ['#7c3aed', '#c026d3'], icon: '🛡️' },
-  kriptopara: { gradient: ['#f59e0b', '#ef4444'], icon: '₿' },
-  forex: { gradient: ['#10b981', '#0d9488'], icon: '💱' },
-  hisse: { gradient: ['#3b82f6', '#6366f1'], icon: '📊' },
-  genel: { gradient: ['#64748b', '#475569'], icon: '💡' },
+  'teknik-analiz': { gradient: ['#2563eb', '#0ea5e9'], icon: '??' },
+  'risk-yonetimi': { gradient: ['#7c3aed', '#c026d3'], icon: '???' },
+  kriptopara: { gradient: ['#f59e0b', '#ef4444'], icon: '?' },
+  forex: { gradient: ['#10b981', '#0d9488'], icon: '??' },
+  hisse: { gradient: ['#3b82f6', '#6366f1'], icon: '??' },
+  genel: { gradient: ['#64748b', '#475569'], icon: '??' },
 }
 
 function LearnPage() {
@@ -3085,7 +4228,7 @@ function LearnPage() {
     }
   }, [])
 
-  // ── Full Article View ──
+  // ¦¦ Full Article View ¦¦
   if (selectedPost) {
     const rt = readingTime(selectedPost.paragraphs)
     return (
@@ -3096,7 +4239,7 @@ function LearnPage() {
             className="ghost-button"
             onClick={() => setSelectedPost(null)}
           >
-            ← Blog'a Dön
+            ‹ Blog'a Dön
           </button>
         </div>
 
@@ -3165,7 +4308,7 @@ function LearnPage() {
                 className="ghost-button"
                 onClick={() => setSelectedPost(null)}
               >
-                ← Blog'a Dön
+                ‹ Blog'a Dön
               </button>
             </div>
           </div>
@@ -3174,7 +4317,7 @@ function LearnPage() {
     )
   }
 
-  // ── Blog Listing View ──
+  // ¦¦ Blog Listing View ¦¦
   const featured = adminPosts[0]
   const rest = adminPosts.slice(1)
 
@@ -3307,7 +4450,7 @@ function LearnPage() {
               Admin panelinden içerik ekleyebilirsin.
               <br />
               <a href="http://admin.localhost:5173/egitim" target="_blank" rel="noopener noreferrer">
-                Admin paneline git →
+                Admin paneline git ›
               </a>
             </p>
           </div>
@@ -3660,13 +4803,14 @@ type BotPageProps = {
   activity: ActivityEvent[]
   universe: InstrumentConfig[]
   portfolioTransferItems: PortfolioPosition[]
-  watchlistCount: number
   quoteMap: Map<string, QuoteData>
+  portfolioCash: number
+  walletTransfers: DbBotWalletTransfer[]
   onStart: () => void
   onStop: () => void
   onRunOnce: () => void
   onReset: () => void
-  onAddCash: (amount: number) => void
+  onCashTransfer: (request: BotCashTransferRequest) => { ok: boolean; message: string }
   onMovePortfolioToBot: (instrumentId: string) => void
   onMoveBotToPortfolio: (instrumentId: string) => void
   showConfigModal: boolean
@@ -3685,21 +4829,57 @@ function BotPage({
   activity,
   universe,
   portfolioTransferItems,
-  watchlistCount,
   quoteMap,
+  portfolioCash,
+  walletTransfers,
   onStart,
   onStop,
   onRunOnce,
   onReset,
-  onAddCash,
+  onCashTransfer,
   onMovePortfolioToBot,
   onMoveBotToPortfolio,
   showConfigModal,
   onConfigModalClose,
   onStartConfirm,
 }: BotPageProps) {
+  function formatTransferAmountInput(raw: string): string {
+    const sanitized = raw.replace(/[^\d,]/g, '')
+    if (!sanitized) return ''
+    const [intPartRaw, decimalPartRaw = ''] = sanitized.split(',')
+    const intDigits = intPartRaw.replace(/^0+(?=\d)/, '')
+    const formattedInt = new Intl.NumberFormat('tr-TR').format(Number(intDigits || '0'))
+    if (sanitized.endsWith(',') && decimalPartRaw.length === 0) {
+      return `${formattedInt},`
+    }
+    if (decimalPartRaw.length > 0) {
+      return `${formattedInt},${decimalPartRaw.slice(0, 2)}`
+    }
+    return formattedInt
+  }
+
+  function parseTransferAmountInput(value: string): number {
+    const normalized = value.replace(/\./g, '').replace(/\s/g, '').replace(',', '.')
+    const parsed = Number(normalized)
+    return Number.isFinite(parsed) ? parsed : Number.NaN
+  }
+
+  function amountToTransferInput(value: number): string {
+    const safe = Math.max(0, value)
+    const fixed = Number(safe.toFixed(2))
+    const [intPart, decimalPart] = fixed.toFixed(2).split('.')
+    const formattedInt = new Intl.NumberFormat('tr-TR').format(Number(intPart))
+    return decimalPart === '00' ? formattedInt : `${formattedInt},${decimalPart}`
+  }
+
   const [resetConfirm, setResetConfirm] = useState(false)
-  const [cashInput, setCashInput] = useState('10000')
+  const [confirmPortfolioTransferId, setConfirmPortfolioTransferId] = useState<string | null>(null)
+  const [confirmBotReturnId, setConfirmBotReturnId] = useState<string | null>(null)
+  const [cashInput, setCashInput] = useState('2.500')
+  const [cashSource, setCashSource] = useState<'portfolio_cash' | 'external_topup'>('portfolio_cash')
+  const [cashDirection, setCashDirection] = useState<'in' | 'out'>('in')
+  const [cashStep, setCashStep] = useState<1 | 2>(1)
+  const [cashNote, setCashNote] = useState('')
   const [liveTime, setLiveTime] = useState(() => new Date().toLocaleTimeString('tr-TR'))
   const [livePrices, setLivePrices] = useState<Map<string, { price: number; change: number }>>(
     () => {
@@ -3738,7 +4918,6 @@ function BotPage({
   )
 
   const valuation = useMemo(() => botPortfolioValue(state, priceLookup), [state, priceLookup])
-  const allocation = state.cash * RISK_FACTORS[config.risk]
   const openAiAvailable = integrationConfig.openAiAvailable
   const tradeStats = useMemo(() => {
     const buys = state.trades.filter((t) => t.side === 'buy').length
@@ -3766,6 +4945,36 @@ function BotPage({
     return { buys, sells, wins, losses, winRate, realized, closed: closedPnls.length }
   }, [state.trades])
 
+  const engagedCapital = useMemo(
+    () =>
+      state.positions.reduce(
+        (sum, position) => sum + position.quantity * position.averageCost,
+        0,
+      ),
+    [state.positions],
+  )
+
+  const nextBuyAllocation = useMemo(
+    () => previewBuyAllocation(state, { ...config, strategy: 'ai' }),
+    [config, state],
+  )
+
+  const tradeCapitalFlow = useMemo(
+    () =>
+      state.trades.slice(0, 10).map((trade) => {
+        const gross = trade.quantity * trade.price
+        return {
+          id: trade.id,
+          at: trade.timestamp,
+          side: trade.side,
+          symbol: trade.symbol,
+          gross,
+          signed: trade.side === 'buy' ? gross : -gross,
+        }
+      }),
+    [state.trades],
+  )
+
   const positionRows = state.positions.map((position) => {
     const live = priceLookup(position.instrumentId)
     const price = live ?? position.averageCost
@@ -3775,6 +4984,64 @@ function BotPage({
     const pnlPct = cost === 0 ? 0 : (pnl / cost) * 100
     return { position, price, marketValue, pnl, pnlPct, live }
   })
+
+  const parsedCashAmount = parseTransferAmountInput(cashInput)
+  const cashAmountValid = Number.isFinite(parsedCashAmount) && parsedCashAmount > 0
+  const usdTryRate = quoteMap.get('usdtry')?.price ?? null
+  const eurTryRate = quoteMap.get('eurtry')?.price ?? null
+  const fxSpread = 0.0035
+  const fxQuote = useMemo(() => {
+    if (config.currency === 'USD') {
+      return {
+        pair: 'USD/USD',
+        mid: 1,
+        bid: 1,
+        ask: 1,
+      }
+    }
+    if (config.currency === 'TRY') {
+      if (!Number.isFinite(usdTryRate) || (usdTryRate ?? 0) <= 0) return null
+      const mid = Number(usdTryRate)
+      return {
+        pair: 'USD/TRY',
+        mid,
+        bid: mid * (1 - fxSpread),
+        ask: mid * (1 + fxSpread),
+      }
+    }
+    if (!Number.isFinite(usdTryRate) || !Number.isFinite(eurTryRate) || (usdTryRate ?? 0) <= 0 || (eurTryRate ?? 0) <= 0) {
+      return null
+    }
+    const mid = Number(usdTryRate) / Number(eurTryRate)
+    return {
+      pair: 'USD/EUR (çapraz)',
+      mid,
+      bid: mid * (1 - fxSpread),
+      ask: mid * (1 + fxSpread),
+    }
+  }, [config.currency, eurTryRate, usdTryRate])
+  const transferSource: BotCashTransferSource =
+    cashDirection === 'out'
+      ? 'portfolio_withdraw'
+      : cashSource
+  const transferFeeRate =
+    transferSource === 'external_topup' ? 0.0025 : 0
+  const transferFeeAmount = cashAmountValid ? parsedCashAmount * transferFeeRate : 0
+  const transferNetAmount = cashAmountValid ? Math.max(0, parsedCashAmount - transferFeeAmount) : 0
+  const hasSufficientSourceBalance =
+    cashDirection === 'out'
+      ? parsedCashAmount <= state.cash
+      : transferSource === 'portfolio_cash'
+        ? parsedCashAmount <= portfolioCash
+        : true
+  const requiresLiveFxForOut = cashDirection === 'out' && config.currency !== 'USD'
+  const hasLiveFxForOut = !requiresLiveFxForOut || fxQuote !== null
+  const fxConvertedNetForOut =
+    cashAmountValid && cashDirection === 'out' && fxQuote
+      ? transferNetAmount * fxQuote.bid
+      : null
+  const canSubmitTransfer =
+    cashAmountValid && hasSufficientSourceBalance && hasLiveFxForOut
 
   function handleConfirmReset() {
     if (!resetConfirm) {
@@ -3787,13 +5054,56 @@ function BotPage({
 
   function handleAddCashSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const normalized = cashInput.replace(/\s/g, '').replace(',', '.')
-    const amount = Number(normalized)
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (!canSubmitTransfer) return
+    if (cashStep === 1) {
+      setCashStep(2)
       return
     }
-    onAddCash(amount)
+
+    const result = onCashTransfer({
+      amount: parsedCashAmount,
+      source: transferSource,
+      direction: cashDirection,
+      currency: config.currency,
+      quotePair: cashDirection === 'out' ? fxQuote?.pair : undefined,
+      quoteMode: cashDirection === 'out' && fxQuote ? 'bid' : undefined,
+      exchangeRate: cashDirection === 'out' && fxQuote ? Number(fxQuote.bid.toFixed(8)) : undefined,
+      convertedAmount:
+        cashDirection === 'out' && fxConvertedNetForOut != null
+          ? Number(fxConvertedNetForOut.toFixed(2))
+          : undefined,
+      note: cashNote.trim() || undefined,
+    })
+
+    if (!result.ok) {
+      return
+    }
     setCashInput('')
+    setCashNote('')
+    setCashStep(1)
+  }
+
+  function handleFillAllBotCash() {
+    setCashInput(amountToTransferInput(state.cash))
+    if (cashStep === 2) setCashStep(1)
+  }
+
+  function handleMovePortfolioToBotConfirm(instrumentId: string) {
+    if (confirmPortfolioTransferId !== instrumentId) {
+      setConfirmPortfolioTransferId(instrumentId)
+      return
+    }
+    onMovePortfolioToBot(instrumentId)
+    setConfirmPortfolioTransferId(null)
+  }
+
+  function handleMoveBotToPortfolioConfirm(instrumentId: string) {
+    if (confirmBotReturnId !== instrumentId) {
+      setConfirmBotReturnId(instrumentId)
+      return
+    }
+    onMoveBotToPortfolio(instrumentId)
+    setConfirmBotReturnId(null)
   }
 
   const tradeMarkers = useMemo(
@@ -3826,7 +5136,7 @@ function BotPage({
                   <span className="bot-ticker-sym">{inst.symbol}</span>
                   <span className="bot-ticker-price">{lp.price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                   <span className={pos ? 'bot-ticker-chg positive' : 'bot-ticker-chg negative'}>
-                    {pos ? '▲' : '▼'} {Math.abs(lp.change).toFixed(2)}%
+                    {pos ? '^' : '¡'} {Math.abs(lp.change).toFixed(2)}%
                   </span>
                 </div>
               )
@@ -3895,7 +5205,7 @@ function BotPage({
         <article className={`bot-kpi ${valuation.pnl >= 0 ? 'gradient-green' : 'gradient-red'}`}>
           <span className="bot-kpi-label">Net P/L</span>
           <strong className="bot-kpi-value">
-            {valuation.pnl >= 0 ? '+' : '−'}$
+            {valuation.pnl >= 0 ? '+' : '-'}$
             {Math.abs(valuation.pnl).toLocaleString('tr-TR', { maximumFractionDigits: 0 })}
           </strong>
           <small>{formatPercent(valuation.pnlPct)} başlangıca göre</small>
@@ -3912,10 +5222,60 @@ function BotPage({
           <strong className="bot-kpi-value">%{tradeStats.winRate.toFixed(0)}</strong>
           <small>
             {tradeStats.wins} kazanan · {tradeStats.losses} kaybeden · realize{' '}
-            {tradeStats.realized >= 0 ? '+' : '−'}$
+            {tradeStats.realized >= 0 ? '+' : '-'}$
             {Math.abs(tradeStats.realized).toLocaleString('tr-TR', { maximumFractionDigits: 0 })}
           </small>
         </article>
+      </section>
+
+      <section className="card page-enter">
+        <header className="card-head">
+          <div>
+            <p className="eyebrow">Sermaye Akışı</p>
+            <h3>İşleme Alınan Tutar</h3>
+          </div>
+          <span className="muted">{tradeCapitalFlow.length} kayıt</span>
+        </header>
+        <div className="bot-allocation-grid">
+          <div className="bot-allocation-box">
+            <span>Anlık işleme alınan</span>
+            <strong>${engagedCapital.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}</strong>
+            <small>Açık pozisyon maliyet toplamı</small>
+          </div>
+          <div className="bot-allocation-box">
+            <span>Sonraki alım planı</span>
+            <strong>
+              {nextBuyAllocation.ok
+                ? `$${nextBuyAllocation.grossAllocation.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}`
+                : '-'}
+            </strong>
+            <small>{nextBuyAllocation.ok ? 'risk + min/max kurallarına göre' : nextBuyAllocation.reason ?? 'planlanamadı'}</small>
+          </div>
+          <div className="bot-allocation-box">
+            <span>Min / Max aralığı</span>
+            <strong>
+              ${Math.max(0, config.minBalance).toLocaleString('tr-TR', { maximumFractionDigits: 2 })}
+              {' / '}
+              {config.maxBalance > 0
+                ? `$${config.maxBalance.toLocaleString('tr-TR', { maximumFractionDigits: 2 })}`
+                : 'Sınırsız'}
+            </strong>
+            <small>Başlatma ayarından yönetilir</small>
+          </div>
+        </div>
+        {tradeCapitalFlow.length > 0 && (
+          <div className="bot-allocation-flow">
+            {tradeCapitalFlow.map((entry) => (
+              <div key={entry.id} className="bot-allocation-row">
+                <strong>{entry.side === 'buy' ? 'AL' : 'SAT'} · {entry.symbol}</strong>
+                <small>{new Date(entry.at).toLocaleString('tr-TR')}</small>
+                <span className={entry.signed >= 0 ? 'positive' : 'negative'}>
+                  {entry.signed >= 0 ? '+' : '-'}${Math.abs(entry.signed).toLocaleString('tr-TR', { maximumFractionDigits: 2 })}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       {!openAiAvailable && (
@@ -3935,7 +5295,7 @@ function BotPage({
         <article className={`card bot-chart-card${running ? ' bot-chart-live' : ''}`}>
           <header className="card-head">
             <div>
-              <p className="eyebrow">{running ? '● Canlı performans' : 'Performans geçmişi'}</p>
+              <p className="eyebrow">{running ? '? Canlı performans' : 'Performans geçmişi'}</p>
               <h3>Sanal portföy eğrisi</h3>
             </div>
             <div className="bot-chart-legend">
@@ -3946,7 +5306,7 @@ function BotPage({
                 <span /> SAT
               </span>
               <span className={valuation.pnl >= 0 ? 'chip ok' : 'chip warn'}>
-                {valuation.pnl >= 0 ? '↗' : '↘'} {formatPercent(valuation.pnlPct)}
+                {valuation.pnl >= 0 ? '?' : '?'} {formatPercent(valuation.pnlPct)}
               </span>
             </div>
           </header>
@@ -4013,22 +5373,15 @@ function BotPage({
         <article className="card">
           <header className="card-head">
             <div>
-              <p className="eyebrow">Yapılandırma</p>
-              <h3>AI karar ve risk</h3>
+              <p className="eyebrow">Para Yönetimi</p>
+              <h3>Bot Cüzdanı ve Transfer Kontrolü</h3>
             </div>
             <div className="bot-meta-inline">
               <span>
-                Evren <strong>{universe.length}</strong> (
-                {config.fundingMode === 'portfolio'
-                  ? 'portföy'
-                  : watchlistCount > 0
-                    ? 'watchlist'
-                    : 'varsayılan'}
-                )
+                Portföy nakdi <strong>${portfolioCash.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}</strong>
               </span>
               <span>
-                Tahsis ~$
-                <strong>{allocation.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}</strong>
+                Bot nakdi <strong>${state.cash.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}</strong>
               </span>
             </div>
           </header>
@@ -4074,10 +5427,10 @@ function BotPage({
                         </span>
                         <button
                           type="button"
-                          className="ghost-button"
-                          onClick={() => onMovePortfolioToBot(item.id)}
+                          className={confirmPortfolioTransferId === item.id ? 'ghost-button danger' : 'ghost-button'}
+                          onClick={() => handleMovePortfolioToBotConfirm(item.id)}
                         >
-                          Bota aktar
+                          {confirmPortfolioTransferId === item.id ? 'Onayla' : 'Bota aktar'}
                         </button>
                       </div>
                     ))}
@@ -4086,68 +5439,163 @@ function BotPage({
               </div>
             )}
 
-            <div className="form-field full">
-              <span>Nakit ekle</span>
-              <div className="form-field">
-                <span>Para birimi</span>
-                <div className="pill-group">
-                  {(['USD', 'TRY', 'EUR'] as const).map((curr) => (
-                    <button
-                      key={curr}
-                      type="button"
-                      className={config.currency === curr ? 'pill is-active' : 'pill'}
-                      onClick={() => setConfig({ ...config, currency: curr })}
-                    >
-                      {curr}
+            {config.fundingMode === 'wallet' && (
+              <div className="form-field full">
+                <span>Bot bakiyesi transferi (adımlı)</span>
+                <div className="bot-cash-wizard">
+                  <div className="bot-cash-stepper">
+                    <span className={cashStep === 1 ? 'is-active' : 'is-done'}>1. Kaynak</span>
+                    <span className={cashStep === 2 ? 'is-active' : ''}>2. Onay</span>
+                  </div>
+
+                  <div className="form-field">
+                    <span>İşlem yönü</span>
+                    <div className="pill-group">
+                      <button
+                        type="button"
+                        className={cashDirection === 'in' ? 'pill is-active' : 'pill'}
+                        onClick={() => { setCashDirection('in'); setCashStep(1) }}
+                      >
+                        Bota aktar
+                      </button>
+                      <button
+                        type="button"
+                        className={cashDirection === 'out' ? 'pill is-active' : 'pill'}
+                        onClick={() => { setCashDirection('out'); setCashStep(1) }}
+                      >
+                        Portföye geri çek
+                      </button>
+                    </div>
+                    {cashDirection === 'out' && (
+                      <div className="bot-cash-quick-actions">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={handleFillAllBotCash}
+                        >
+                          Tüm bot nakdini seç (${state.cash.toLocaleString('tr-TR', { maximumFractionDigits: 2 })})
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {cashDirection === 'in' && (
+                    <div className="form-field">
+                      <span>Kaynak</span>
+                      <div className="pill-group">
+                        <button
+                          type="button"
+                          className={cashSource === 'portfolio_cash' ? 'pill is-active' : 'pill'}
+                          onClick={() => { setCashSource('portfolio_cash'); setCashStep(1) }}
+                        >
+                          Portföy nakdi (${portfolioCash.toLocaleString('tr-TR', { maximumFractionDigits: 0 })})
+                        </button>
+                        <button
+                          type="button"
+                          className={cashSource === 'external_topup' ? 'pill is-active' : 'pill'}
+                          onClick={() => { setCashSource('external_topup'); setCashStep(1) }}
+                        >
+                          Dış yükleme
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="form-field">
+                    <span>Para birimi</span>
+                    <div className="pill-group">
+                      {(['USD', 'TRY', 'EUR'] as const).map((curr) => (
+                        <button
+                          key={curr}
+                          type="button"
+                          className={config.currency === curr ? 'pill is-active' : 'pill'}
+                          onClick={() => setConfig({ ...config, currency: curr })}
+                        >
+                          {curr}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <form className="bot-cash-form" onSubmit={handleAddCashSubmit}>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={cashInput}
+                      onChange={(event) => { setCashInput(formatTransferAmountInput(event.target.value)); if (cashStep === 2) setCashStep(1) }}
+                      placeholder={cashDirection === 'in' ? 'Aktarılacak tutar' : 'Geri çekilecek tutar'}
+                    />
+                    <button type="submit" className="ghost-button" disabled={!canSubmitTransfer}>
+                      {cashStep === 1 ? <><ChevronRight size={14} /> Devam</> : <><Save size={14} /> Onayla</>}
                     </button>
-                  ))}
+                  </form>
+
+                  <label className="form-field">
+                    <span>Not (opsiyonel)</span>
+                    <input
+                      type="text"
+                      value={cashNote}
+                      onChange={(event) => setCashNote(event.target.value)}
+                      placeholder="örn. Risk artırımı, manuel dengeleme"
+                    />
+                  </label>
+
+                  <div className={`bot-cash-summary${cashAmountValid && hasSufficientSourceBalance && hasLiveFxForOut ? ' is-ok' : ' is-warn'}`}>
+                    <strong>Transfer özeti</strong>
+                    <small>Brüt: {cashAmountValid ? `$${parsedCashAmount.toFixed(2)}` : '-'}</small>
+                    <small>Ücret: {cashAmountValid ? `$${transferFeeAmount.toFixed(2)}` : '-'}</small>
+                    <small>Net: {cashAmountValid ? `$${transferNetAmount.toFixed(2)}` : '-'}</small>
+                    {cashDirection === 'out' && config.currency !== 'USD' && (
+                      <>
+                        <small>
+                          Kur ({fxQuote?.pair ?? 'kur bekleniyor'}):
+                          {' '}
+                          {fxQuote
+                            ? `Alış ${fxQuote.bid.toLocaleString('tr-TR', { maximumFractionDigits: 4 })} · Satış ${fxQuote.ask.toLocaleString('tr-TR', { maximumFractionDigits: 4 })}`
+                            : 'anlık veri alınamadı'}
+                        </small>
+                        <small>
+                          Çekim karşılığı ({config.currency}):
+                          {' '}
+                          {fxConvertedNetForOut != null
+                            ? fxConvertedNetForOut.toLocaleString('tr-TR', { maximumFractionDigits: 2 })
+                            : '-'}
+                        </small>
+                      </>
+                    )}
+                    {!hasSufficientSourceBalance && (
+                      <small className="negative">
+                        {cashDirection === 'out' ? 'Bot nakdi yetersiz.' : 'Seçilen kaynakta bakiye yetersiz.'}
+                      </small>
+                    )}
+                    {!hasLiveFxForOut && (
+                      <small className="negative">
+                        {config.currency} kuru alınamadığı için işlem yapılamaz. Döviz verisi yenilenene kadar bekleyin.
+                      </small>
+                    )}
+                  </div>
+
+                  <div className="bot-cash-history">
+                    <span>Son transferler</span>
+                    {walletTransfers.length === 0 ? (
+                      <p className="muted small">Henüz transfer kaydı yok.</p>
+                    ) : (
+                      <ul>
+                      {walletTransfers.slice(0, 4).map((transfer) => (
+                        <li key={transfer.id}>
+                          <strong>{transfer.direction === 'in' ? '+' : '-'}${transfer.netAmount.toFixed(2)}</strong>
+                          <small>
+                            {new Date(transfer.createdAt).toLocaleString('tr-TR')} · {transfer.source}
+                            {transfer.convertedAmount != null ? ` · ${transfer.convertedAmount.toFixed(2)} ${transfer.currency}` : ''}
+                          </small>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  </div>
                 </div>
               </div>
-              <form className="bot-cash-form" onSubmit={handleAddCashSubmit}>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={cashInput}
-                  onChange={(event) => setCashInput(event.target.value)}
-                  placeholder="İstediğin tutarı yaz"
-                />
-                <button type="submit" className="ghost-button">
-                  <Plus size={14} /> Ekle
-                </button>
-              </form>
-            </div>
-
-            <div className="form-field">
-              <span>Risk seviyesi</span>
-              <div className="pill-group">
-                {(['low', 'medium', 'high'] as BotRisk[]).map((r) => (
-                  <button
-                    key={r}
-                    type="button"
-                    className={config.risk === r ? 'pill is-active' : 'pill'}
-                    onClick={() => setConfig({ ...config, risk: r })}
-                  >
-                    {RISK_LABEL[r]}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="form-field">
-              <span>Tarama aralığı</span>
-              <div className="pill-group">
-                {INTERVAL_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    className={config.intervalSeconds === opt.value ? 'pill is-active' : 'pill'}
-                    onClick={() => setConfig({ ...config, intervalSeconds: opt.value })}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+            )}
 
           </div>
 
@@ -4201,11 +5649,11 @@ function BotPage({
                     <button
                       type="button"
                       className="icon-mini delete-btn"
-                      onClick={() => onMoveBotToPortfolio(row.position.instrumentId)}
+                      onClick={() => handleMoveBotToPortfolioConfirm(row.position.instrumentId)}
                       aria-label="Portföye geri al"
                       title="Portföye geri al"
                     >
-                      <Trash2 size={16} />
+                      {confirmBotReturnId === row.position.instrumentId ? <Save size={16} /> : <Trash2 size={16} />}
                     </button>
                   )}
                 </div>
@@ -4579,7 +6027,7 @@ function formatTime(value: string) {
 function currencySymbol(currency: Profile['preferredCurrency']) {
   if (currency === 'USD') return '$'
   if (currency === 'EUR') return '€'
-  return '₺'
+  return '?'
 }
 
 function formatCurrencyValue(value: number, currency: Profile['preferredCurrency']) {
@@ -4587,7 +6035,7 @@ function formatCurrencyValue(value: number, currency: Profile['preferredCurrency
 }
 
 function formatSignedCurrency(value: number, currency: Profile['preferredCurrency']) {
-  const sign = value >= 0 ? '+' : '−'
+  const sign = value >= 0 ? '+' : '-'
   const abs = Math.abs(value).toLocaleString('tr-TR', { maximumFractionDigits: 0 })
   return `${sign}${currencySymbol(currency)}${abs}`
 }
@@ -4619,7 +6067,7 @@ function mapIndicatorStatus(status: string) {
   return 'neutral-text'
 }
 
-// ─── LoginPage ────────────────────────────────────────────────────────────────
+// ¦¦¦ LoginPage ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
 
 function LoginPage({ onLogin }: { onLogin: (session: SessionUser) => void }) {
   const [tab, setTab] = useState<'login' | 'register'>('login')
@@ -4864,7 +6312,7 @@ function LoginPage({ onLogin }: { onLogin: (session: SessionUser) => void }) {
                 className="login-link"
                 onClick={() => { setMode('auth'); resetAllFields() }}
               >
-                ← Girişe geri dön
+                ‹ Girişe geri dön
               </button>
             </div>
           </form>
@@ -4874,7 +6322,7 @@ function LoginPage({ onLogin }: { onLogin: (session: SessionUser) => void }) {
     </div>
   )
 }
-// ─── SupportPage ──────────────────────────────────────────────────────────────
+// ¦¦¦ SupportPage ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
 
 type SupportTicket = {
   id: string
@@ -5123,3 +6571,5 @@ function SupportPage({ session }: { session: SessionUser | null }) {
 }
 
 export default App
+
+

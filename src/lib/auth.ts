@@ -425,6 +425,25 @@ export async function deleteUser(userId: string): Promise<void> {
   await supabase.from('profiles').delete().eq('id', userId)
 }
 
+export async function setUserRole(userId: string, role: UserRole): Promise<boolean> {
+  const { error } = await supabase.from('profiles').update({ role }).eq('id', userId)
+  if (error) {
+    console.error('[auth] setUserRole failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      role,
+    })
+    return false
+  }
+  if (cachedSessionUser?.id === userId) {
+    cachedSessionUser = { ...cachedSessionUser, role }
+  }
+  return true
+}
+
 export async function adminResetPassword(
   _userId: string,
   _newPassword: string,

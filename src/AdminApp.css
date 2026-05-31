@@ -511,6 +511,10 @@
   width: auto;
 }
 
+.admin-role-inline {
+  min-width: 140px;
+}
+
 /* ── Stats Grid ── */
 .admin-stats-grid {
   display: grid;
@@ -863,6 +867,168 @@
   color: var(--a-muted);
 }
 
+/* â”€â”€ Control Unit â”€â”€ */
+.admin-control-layout {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.admin-control-users-card {
+  position: sticky;
+  top: 20px;
+}
+
+.admin-control-user-list {
+  display: grid;
+  gap: 6px;
+  max-height: 680px;
+  overflow-y: auto;
+}
+
+.admin-control-user-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px;
+  border-radius: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-control-user-btn:hover {
+  background: var(--a-surface);
+}
+
+.admin-control-user-btn.is-active {
+  background: rgba(124, 58, 237, 0.08);
+  border-color: rgba(124, 58, 237, 0.22);
+}
+
+.admin-control-user-meta {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-control-user-meta strong {
+  font-size: 0.86rem;
+  color: var(--a-heading);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-control-user-meta small {
+  font-size: 0.74rem;
+  color: var(--a-muted);
+}
+
+.admin-control-main {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.admin-control-stats-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.admin-control-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.admin-control-meta-item {
+  background: var(--a-surface);
+  border: 1px solid var(--a-border);
+  border-radius: 11px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.admin-control-meta-item span {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--a-muted);
+  font-weight: 700;
+}
+
+.admin-control-meta-item strong {
+  font-size: 0.85rem;
+  color: var(--a-heading);
+  overflow-wrap: anywhere;
+}
+
+.admin-control-two-col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.admin-control-list {
+  display: grid;
+  gap: 7px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.admin-control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--a-surface);
+  border: 1px solid var(--a-border);
+  border-radius: 10px;
+  padding: 9px 10px;
+}
+
+.admin-control-row strong {
+  display: block;
+  font-size: 0.84rem;
+  color: var(--a-heading);
+}
+
+.admin-control-row small {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.75rem;
+  color: var(--a-muted);
+}
+
+.admin-control-row-right {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  font-size: 0.76rem;
+  color: var(--a-muted);
+  flex-shrink: 0;
+}
+
+.admin-control-subtitle {
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--a-muted);
+  margin: 4px 0 8px;
+}
+
+.admin-control-watchlist {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* ── Logs ── */
 .admin-log-list {
   display: grid;
@@ -1102,6 +1268,16 @@
 
   .admin-dash-grid {
     grid-template-columns: 1fr;
+  }
+
+  .admin-control-layout,
+  .admin-control-two-col,
+  .admin-control-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-control-users-card {
+    position: static;
   }
 
   .admin-log-item {

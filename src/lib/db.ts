@@ -3,25 +3,55 @@
 // â”€â”€â”€ Watchlist â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export async function fetchWatchlist(userId: string): Promise<string[]> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('watchlist')
     .select('instrument_id')
     .eq('user_id', userId)
+  if (error) {
+    console.error('[watchlist] fetchWatchlist failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+    })
+    return []
+  }
   return (data ?? []).map((r) => String(r.instrument_id))
 }
 
 export async function addWatchlistItem(userId: string, instrumentId: string): Promise<void> {
-  await supabase
+  const { error } = await supabase
     .from('watchlist')
     .upsert({ user_id: userId, instrument_id: instrumentId }, { onConflict: 'user_id,instrument_id' })
+  if (error) {
+    console.error('[watchlist] addWatchlistItem failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      instrumentId,
+    })
+  }
 }
 
 export async function removeWatchlistItem(userId: string, instrumentId: string): Promise<void> {
-  await supabase
+  const { error } = await supabase
     .from('watchlist')
     .delete()
     .eq('user_id', userId)
     .eq('instrument_id', instrumentId)
+  if (error) {
+    console.error('[watchlist] removeWatchlistItem failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      instrumentId,
+    })
+  }
 }
 
 // â”€â”€â”€ Positions (portfolio) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -35,11 +65,21 @@ export type DbPosition = {
 }
 
 export async function fetchPositions(userId: string): Promise<DbPosition[]> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('positions')
     .select('id, instrument_id, quantity, average_cost, added_at')
     .eq('user_id', userId)
     .order('added_at', { ascending: false })
+  if (error) {
+    console.error('[positions] fetchPositions failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+    })
+    return []
+  }
   return (data ?? []).map((r) => ({
     id: String(r.id),
     instrumentId: String(r.instrument_id),
@@ -63,26 +103,233 @@ export async function upsertPosition(
     .eq('instrument_id', instrumentId)
     .maybeSingle()
   if (existing) {
-    await supabase
+    const { error } = await supabase
       .from('positions')
       .update({ quantity, average_cost: averageCost })
       .eq('id', existing.id)
+    if (error) {
+      console.error('[positions] upsertPosition update failed', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+        userId,
+        instrumentId,
+      })
+    }
   } else {
-    await supabase.from('positions').insert({
+    const { error } = await supabase.from('positions').insert({
       user_id: userId,
       instrument_id: instrumentId,
       quantity,
       average_cost: averageCost,
     })
+    if (error) {
+      console.error('[positions] upsertPosition insert failed', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+        userId,
+        instrumentId,
+      })
+    }
   }
 }
 
 export async function removePosition(userId: string, instrumentId: string): Promise<void> {
-  await supabase
+  const { error } = await supabase
     .from('positions')
     .delete()
     .eq('user_id', userId)
     .eq('instrument_id', instrumentId)
+  if (error) {
+    console.error('[positions] removePosition failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      instrumentId,
+    })
+  }
+}
+
+export type DbPortfolioWallet = {
+  cashBalance: number
+  withdrawnTotal: number
+}
+
+export async function fetchPortfolioWallet(userId: string): Promise<DbPortfolioWallet | null> {
+  const { data, error } = await supabase
+    .from('portfolio_wallets')
+    .select('cash_balance, withdrawn_total')
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (error) {
+    console.error('[portfolio_wallets] fetch failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+    })
+    return null
+  }
+
+  if (!data) return null
+  return {
+    cashBalance: Number(data.cash_balance ?? 0),
+    withdrawnTotal: Number(data.withdrawn_total ?? 0),
+  }
+}
+
+export async function savePortfolioWallet(
+  userId: string,
+  cashBalance: number,
+  withdrawnTotal: number,
+): Promise<void> {
+  const { error } = await supabase.from('portfolio_wallets').upsert(
+    {
+      user_id: userId,
+      cash_balance: cashBalance,
+      withdrawn_total: withdrawnTotal,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id' },
+  )
+
+  if (error) {
+    console.error('[portfolio_wallets] save failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      cashBalance,
+      withdrawnTotal,
+    })
+  }
+}
+
+export type DbPendingLimitOrder = {
+  id: string
+  instrumentId: string
+  symbol: string
+  label: string
+  market: string
+  quantity: number
+  limitPrice: number
+  commissionRate: number
+  createdAt: string
+}
+
+export async function fetchPendingLimitOrders(userId: string): Promise<DbPendingLimitOrder[]> {
+  const { data, error } = await supabase
+    .from('pending_limit_orders')
+    .select(
+      'id, instrument_id, symbol, label, market, quantity, limit_price, commission_rate, created_at',
+    )
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+
+  if (error) {
+    console.error('[pending_limit_orders] fetch failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+    })
+    return []
+  }
+
+  return (data ?? []).map((row) => ({
+    id: String(row.id),
+    instrumentId: String(row.instrument_id),
+    symbol: String(row.symbol ?? ''),
+    label: String(row.label ?? ''),
+    market: String(row.market ?? ''),
+    quantity: Number(row.quantity),
+    limitPrice: Number(row.limit_price),
+    commissionRate: Number(row.commission_rate ?? 0),
+    createdAt: String(row.created_at),
+  }))
+}
+
+export async function addPendingLimitOrder(
+  userId: string,
+  payload: {
+    instrumentId: string
+    symbol: string
+    label: string
+    market: string
+    quantity: number
+    limitPrice: number
+    commissionRate: number
+  },
+): Promise<DbPendingLimitOrder | null> {
+  const { data, error } = await supabase
+    .from('pending_limit_orders')
+    .insert({
+      user_id: userId,
+      instrument_id: payload.instrumentId,
+      symbol: payload.symbol,
+      label: payload.label,
+      market: payload.market,
+      quantity: payload.quantity,
+      limit_price: payload.limitPrice,
+      commission_rate: payload.commissionRate,
+    })
+    .select(
+      'id, instrument_id, symbol, label, market, quantity, limit_price, commission_rate, created_at',
+    )
+    .maybeSingle()
+
+  if (error) {
+    console.error('[pending_limit_orders] add failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      payload,
+    })
+    return null
+  }
+
+  if (!data) return null
+  return {
+    id: String(data.id),
+    instrumentId: String(data.instrument_id),
+    symbol: String(data.symbol ?? ''),
+    label: String(data.label ?? ''),
+    market: String(data.market ?? ''),
+    quantity: Number(data.quantity),
+    limitPrice: Number(data.limit_price),
+    commissionRate: Number(data.commission_rate ?? 0),
+    createdAt: String(data.created_at),
+  }
+}
+
+export async function deletePendingLimitOrder(userId: string, orderId: string): Promise<void> {
+  const { error } = await supabase
+    .from('pending_limit_orders')
+    .delete()
+    .eq('id', orderId)
+    .eq('user_id', userId)
+
+  if (error) {
+    console.error('[pending_limit_orders] delete failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      orderId,
+    })
+  }
 }
 
 // â”€â”€â”€ Notes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -97,11 +344,21 @@ export type DbNote = {
 }
 
 export async function fetchNotes(userId: string): Promise<DbNote[]> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('notes')
     .select('id, instrument_id, symbol, label, text, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
+  if (error) {
+    console.error('[notes] fetchNotes failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+    })
+    return []
+  }
   return (data ?? []).map((r) => ({
     id: String(r.id),
     instrumentId: String(r.instrument_id),
@@ -119,11 +376,23 @@ export async function addNote(
   label: string,
   text: string,
 ): Promise<DbNote | null> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('notes')
     .insert({ user_id: userId, instrument_id: instrumentId, symbol, label, text })
     .select('id, instrument_id, symbol, label, text, created_at')
     .maybeSingle()
+  if (error) {
+    console.error('[notes] addNote failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      instrumentId,
+      symbol,
+    })
+    return null
+  }
   if (!data) return null
   return {
     id: String(data.id),
@@ -136,7 +405,17 @@ export async function addNote(
 }
 
 export async function deleteNote(userId: string, noteId: string): Promise<void> {
-  await supabase.from('notes').delete().eq('id', noteId).eq('user_id', userId)
+  const { error } = await supabase.from('notes').delete().eq('id', noteId).eq('user_id', userId)
+  if (error) {
+    console.error('[notes] deleteNote failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      noteId,
+    })
+  }
 }
 
 // â”€â”€â”€ Price alerts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -150,11 +429,21 @@ export type DbAlert = {
 }
 
 export async function fetchAlerts(userId: string): Promise<DbAlert[]> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('price_alerts')
     .select('id, instrument_id, symbol, price, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
+  if (error) {
+    console.error('[price_alerts] fetchAlerts failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+    })
+    return []
+  }
   return (data ?? []).map((r) => ({
     id: String(r.id),
     instrumentId: String(r.instrument_id),
@@ -170,11 +459,24 @@ export async function addAlert(
   symbol: string,
   price: number,
 ): Promise<DbAlert | null> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('price_alerts')
     .insert({ user_id: userId, instrument_id: instrumentId, symbol, price })
     .select('id, instrument_id, symbol, price, created_at')
     .maybeSingle()
+  if (error) {
+    console.error('[price_alerts] addAlert failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      instrumentId,
+      symbol,
+      price,
+    })
+    return null
+  }
   if (!data) return null
   return {
     id: String(data.id),
@@ -186,7 +488,21 @@ export async function addAlert(
 }
 
 export async function deleteAlert(userId: string, alertId: string): Promise<void> {
-  await supabase.from('price_alerts').delete().eq('id', alertId).eq('user_id', userId)
+  const { error } = await supabase
+    .from('price_alerts')
+    .delete()
+    .eq('id', alertId)
+    .eq('user_id', userId)
+  if (error) {
+    console.error('[price_alerts] deleteAlert failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      alertId,
+    })
+  }
 }
 
 // â”€â”€â”€ Bot config + state (jsonb blobs) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -241,6 +557,205 @@ export async function recordBotTrade(
     confidence: trade.confidence ?? null,
     reason: trade.reason ?? null,
   })
+}
+
+export type DbBotTrade = {
+  id: string
+  instrumentId: string
+  side: 'buy' | 'sell'
+  quantity: number
+  price: number
+  confidence: number | null
+  reason: string | null
+  createdAt: string
+}
+
+export async function fetchBotTrades(userId: string, limit = 200): Promise<DbBotTrade[]> {
+  const { data, error } = await supabase
+    .from('bot_trades')
+    .select('id, instrument_id, side, quantity, price, confidence, reason, created_at')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  if (error) {
+    console.error('[bot_trades] fetchBotTrades failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      limit,
+    })
+    return []
+  }
+
+  return (data ?? []).map((row) => ({
+    id: String(row.id),
+    instrumentId: String(row.instrument_id),
+    side: (row.side as 'buy' | 'sell') ?? 'buy',
+    quantity: Number(row.quantity),
+    price: Number(row.price),
+    confidence: row.confidence == null ? null : Number(row.confidence),
+    reason: row.reason == null ? null : String(row.reason),
+    createdAt: String(row.created_at),
+  }))
+}
+
+export type DbBotWalletTransfer = {
+  id: string
+  userId: string
+  direction: 'in' | 'out'
+  source: 'portfolio_cash' | 'external_topup' | 'portfolio_withdraw'
+  amount: number
+  feeAmount: number
+  netAmount: number
+  currency: string
+  quotePair: string | null
+  quoteMode: 'bid' | 'ask' | 'mid' | null
+  exchangeRate: number | null
+  convertedAmount: number | null
+  note: string | null
+  createdAt: string
+}
+
+export async function fetchBotWalletTransfers(
+  userId: string,
+  limit = 120,
+): Promise<DbBotWalletTransfer[]> {
+  const { data, error } = await supabase
+    .from('bot_wallet_transfers')
+    .select('id, user_id, direction, source, amount, fee_amount, net_amount, currency, quote_pair, quote_mode, exchange_rate, converted_amount, note, created_at')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  if (error) {
+    console.error('[bot_wallet_transfers] fetch failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      limit,
+    })
+    return []
+  }
+
+  return (data ?? []).map((row) => ({
+    id: String(row.id),
+    userId: String(row.user_id),
+    direction: (row.direction as 'in' | 'out') ?? 'in',
+    source:
+      row.source === 'portfolio_cash' || row.source === 'portfolio_withdraw'
+        ? row.source
+        : 'external_topup',
+    amount: Number(row.amount),
+    feeAmount: Number(row.fee_amount ?? 0),
+    netAmount: Number(row.net_amount),
+    currency: String(row.currency ?? 'USD'),
+    quotePair: row.quote_pair == null ? null : String(row.quote_pair),
+    quoteMode:
+      row.quote_mode === 'bid' || row.quote_mode === 'ask' || row.quote_mode === 'mid'
+        ? row.quote_mode
+        : null,
+    exchangeRate: row.exchange_rate == null ? null : Number(row.exchange_rate),
+    convertedAmount: row.converted_amount == null ? null : Number(row.converted_amount),
+    note: row.note == null ? null : String(row.note),
+    createdAt: String(row.created_at),
+  }))
+}
+
+export async function addBotWalletTransfer(
+  userId: string,
+  payload: {
+    direction: 'in' | 'out'
+    source: 'portfolio_cash' | 'external_topup' | 'portfolio_withdraw'
+    amount: number
+    feeAmount?: number
+    netAmount: number
+    currency: string
+    quotePair?: string
+    quoteMode?: 'bid' | 'ask' | 'mid'
+    exchangeRate?: number
+    convertedAmount?: number
+    note?: string
+  },
+): Promise<DbBotWalletTransfer | null> {
+  const { data, error } = await supabase
+    .from('bot_wallet_transfers')
+    .insert({
+      user_id: userId,
+      direction: payload.direction,
+      source: payload.source,
+      amount: payload.amount,
+      fee_amount: payload.feeAmount ?? 0,
+      net_amount: payload.netAmount,
+      currency: payload.currency,
+      quote_pair: payload.quotePair ?? null,
+      quote_mode: payload.quoteMode ?? null,
+      exchange_rate: payload.exchangeRate ?? null,
+      converted_amount: payload.convertedAmount ?? null,
+      note: payload.note ?? null,
+    })
+    .select('id, user_id, direction, source, amount, fee_amount, net_amount, currency, quote_pair, quote_mode, exchange_rate, converted_amount, note, created_at')
+    .maybeSingle()
+
+  if (error) {
+    console.error('[bot_wallet_transfers] add failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      payload,
+    })
+    return null
+  }
+
+  if (!data) return null
+
+  return {
+    id: String(data.id),
+    userId: String(data.user_id),
+    direction: (data.direction as 'in' | 'out') ?? 'in',
+    source:
+      data.source === 'portfolio_cash' || data.source === 'portfolio_withdraw'
+        ? data.source
+        : 'external_topup',
+    amount: Number(data.amount),
+    feeAmount: Number(data.fee_amount ?? 0),
+    netAmount: Number(data.net_amount),
+    currency: String(data.currency ?? 'USD'),
+    quotePair: data.quote_pair == null ? null : String(data.quote_pair),
+    quoteMode:
+      data.quote_mode === 'bid' || data.quote_mode === 'ask' || data.quote_mode === 'mid'
+        ? data.quote_mode
+        : null,
+    exchangeRate: data.exchange_rate == null ? null : Number(data.exchange_rate),
+    convertedAmount: data.converted_amount == null ? null : Number(data.converted_amount),
+    note: data.note == null ? null : String(data.note),
+    createdAt: String(data.created_at),
+  }
+}
+
+export async function deleteBotWalletTransfer(userId: string, transferId: string): Promise<void> {
+  const { error } = await supabase
+    .from('bot_wallet_transfers')
+    .delete()
+    .eq('id', transferId)
+    .eq('user_id', userId)
+
+  if (error) {
+    console.error('[bot_wallet_transfers] delete failed', {
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+      userId,
+      transferId,
+    })
+  }
 }
 
 // â”€â”€â”€ Profile (full row) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

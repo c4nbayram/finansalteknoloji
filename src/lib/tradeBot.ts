@@ -753,8 +753,69 @@ export type ExecutionResult = {
   message: string
 }
 
+export type BuyAllocationPreview = {
+  ok: boolean
+  grossAllocation: number
+  netAllocation: number
+  fee: number
+  reason?: string
+}
+
 function withFee(value: number) {
   return value * TRADING_FEE_RATE
+}
+
+export function previewBuyAllocation(
+  state: BotState,
+  config: BotConfig,
+): BuyAllocationPreview {
+  const cashReserve = state.initialCash * 0.02
+  const deployableCash = Math.max(0, state.cash - cashReserve)
+  const riskAllocation = deployableCash * RISK_FACTORS[config.risk]
+  const exposureCap = state.initialCash * MAX_POSITION_EXPOSURE[config.risk]
+
+  const minConfigured = Math.max(0, Number(config.minBalance ?? 0))
+  const maxConfigured =
+    Number(config.maxBalance ?? 0) > 0
+      ? Math.max(minConfigured, Number(config.maxBalance))
+      : Number.POSITIVE_INFINITY
+
+  let grossAllocation = Math.min(riskAllocation, exposureCap, deployableCash, maxConfigured)
+
+  if (minConfigured > 0) {
+    if (deployableCash < minConfigured) {
+      return {
+        ok: false,
+        grossAllocation: 0,
+        netAllocation: 0,
+        fee: 0,
+        reason: `Min işlem tutarı (${minConfigured.toFixed(2)}) için yeterli nakit yok.`,
+      }
+    }
+    grossAllocation = Math.max(grossAllocation, minConfigured)
+    grossAllocation = Math.min(grossAllocation, deployableCash, exposureCap, maxConfigured)
+  }
+
+  if (grossAllocation < MIN_TRADE_VALUE) {
+    return {
+      ok: false,
+      grossAllocation: 0,
+      netAllocation: 0,
+      fee: 0,
+      reason: 'Yeterli sanal nakit yok.',
+    }
+  }
+
+  const fee = withFee(grossAllocation)
+  const netAllocation = grossAllocation - fee
+
+  return {
+    ok: netAllocation > 0,
+    grossAllocation,
+    netAllocation,
+    fee,
+    reason: netAllocation > 0 ? undefined : 'İşlem sonrası kullanılabilir tutar sıfır.',
+  }
 }
 
 export function executeBuy(
@@ -792,19 +853,12 @@ export function executeBuy(
     }
   }
 
-  const cashReserve = state.initialCash * 0.02
-  const deployableCash = Math.max(0, state.cash - cashReserve)
-  const riskAllocation = deployableCash * RISK_FACTORS[config.risk]
-  const exposureCap = state.initialCash * MAX_POSITION_EXPOSURE[config.risk]
-  const grossAllocation = Math.min(riskAllocation, exposureCap, deployableCash)
-
-  if (grossAllocation < MIN_TRADE_VALUE) {
-    return { state, trade: null, message: 'Yeterli sanal nakit yok.' }
+  const allocation = previewBuyAllocation(state, config)
+  if (!allocation.ok) {
+    return { state, trade: null, message: allocation.reason ?? 'İşleme alınacak tutar hesaplanamadı.' }
   }
 
-  const fee = withFee(grossAllocation)
-  const netAllocation = grossAllocation - fee
-  const quantity = netAllocation / price
+  const quantity = allocation.netAllocation / price
   if (quantity <= 0) {
     return { state, trade: null, message: 'İşlem adedi hesaplanamadı.' }
   }
@@ -825,7 +879,7 @@ export function executeBuy(
   return {
     state: {
       ...state,
-      cash: state.cash - grossAllocation,
+      cash: state.cash - allocation.grossAllocation,
       positions: [
         ...state.positions,
         {

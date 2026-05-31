@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef } from 'react'
+﻿import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import {
   Activity,
@@ -33,12 +33,15 @@ import {
   logout as authLogout,
   getUsers,
   deleteUser,
+  setUserRole,
   adminCreateUser,
   adminResetPassword,
   refreshSessionUser,
   onAuthChange,
+  getLoginHistoryForUser,
   type SessionUser,
   type AuthUser,
+  type LoginHistoryEntry,
 } from './lib/auth'
 import {
   getLogs,
@@ -56,6 +59,21 @@ import {
   deleteTicket as dbDeleteTicket,
   fetchBotState,
   uploadBlogCover,
+  fetchPositions,
+  fetchPortfolioWallet,
+  fetchPendingLimitOrders,
+  deletePendingLimitOrder as dbDeletePendingLimitOrder,
+  fetchNotes,
+  deleteNote as dbDeleteNote,
+  fetchAlerts,
+  deleteAlert as dbDeleteAlert,
+  fetchWatchlist,
+  removeWatchlistItem,
+  fetchBotTrades,
+  fetchBotWalletTransfers,
+  deleteBotWalletTransfer,
+  type DbBotTrade,
+  type DbBotWalletTransfer,
   type DbSupportTicket,
 } from './lib/db'
 import { supabase } from './lib/supabase'
@@ -96,6 +114,149 @@ type SupportTicket = {
   senderRole: 'admin' | 'user'
   createdAt: string
   status: 'open' | 'closed'
+}
+
+type UserControlTicket = {
+  id: string
+  subject: string
+  message: string
+  email: string
+  status: 'open' | 'closed'
+  createdAt: string
+}
+
+type UserControlActivityLog = {
+  id: string
+  level: 'info' | 'warn' | 'error' | 'success' | 'trade'
+  source: string
+  message: string
+  dataPreview: string
+  createdAt: string
+}
+
+type UserControlSnapshot = {
+  wallet: { cashBalance: number; withdrawnTotal: number } | null
+  positions: Awaited<ReturnType<typeof fetchPositions>>
+  pendingOrders: Awaited<ReturnType<typeof fetchPendingLimitOrders>>
+  notes: Awaited<ReturnType<typeof fetchNotes>>
+  alerts: Awaited<ReturnType<typeof fetchAlerts>>
+  watchlist: Awaited<ReturnType<typeof fetchWatchlist>>
+  botTrades: DbBotTrade[]
+  botWalletTransfers: DbBotWalletTransfer[]
+  tickets: UserControlTicket[]
+  loginHistory: LoginHistoryEntry[]
+  activityLogs: UserControlActivityLog[]
+  profileExtras: { bio: string; preferredCurrency: string }
+}
+
+type UserControlActionTarget = {
+  type: 'order' | 'note' | 'alert' | 'watch' | 'transfer'
+  id: string
+}
+
+type UserControlTimelineItem = {
+  id: string
+  at: string
+  tone: 'info' | 'warn' | 'error' | 'success' | 'trade'
+  title: string
+  detail: string
+}
+
+function toDataPreview(value: unknown): string {
+  if (value == null) return ''
+  try {
+    return JSON.stringify(value).slice(0, 220)
+  } catch {
+    return String(value)
+  }
+}
+
+function buildUserControlTimeline(snapshot: UserControlSnapshot): UserControlTimelineItem[] {
+  const fromTrades = snapshot.botTrades.map((trade) => ({
+    id: `trade-${trade.id}`,
+    at: trade.createdAt,
+    tone: 'trade' as const,
+    title: `${trade.side === 'buy' ? 'AL' : 'SAT'} • ${trade.instrumentId}`,
+    detail: `${trade.quantity.toFixed(4)} adet @ $${trade.price.toFixed(2)}${trade.reason ? ` • ${trade.reason}` : ''}`,
+  }))
+
+  const fromOrders = snapshot.pendingOrders.map((order) => ({
+    id: `order-${order.id}`,
+    at: order.createdAt,
+    tone: 'info' as const,
+    title: `Limit emir • ${order.symbol || order.instrumentId}`,
+    detail: `${order.quantity.toFixed(4)} adet • Limit $${order.limitPrice.toFixed(2)} • Komisyon %${order.commissionRate.toFixed(2)}`,
+  }))
+
+  const fromTickets = snapshot.tickets.map((ticket) => ({
+    id: `ticket-${ticket.id}`,
+    at: ticket.createdAt,
+    tone: ticket.status === 'open' ? ('warn' as const) : ('success' as const),
+    title: `Destek • ${ticket.subject}`,
+    detail: `${ticket.status === 'open' ? 'Açık' : 'Kapalı'} • ${ticket.email || 'E-posta yok'}`,
+  }))
+
+  const fromLogins = snapshot.loginHistory.map((entry) => ({
+    id: `login-${entry.id}`,
+    at: entry.at,
+    tone: entry.outcome === 'success' ? ('success' as const) : ('warn' as const),
+    title: `Giriş • ${entry.outcome === 'success' ? 'Başarılı' : 'Başarısız'}`,
+    detail: entry.reason ? `${entry.username} • ${entry.reason}` : entry.username,
+  }))
+
+  const fromActivity = snapshot.activityLogs.map((log) => ({
+    id: `activity-${log.id}`,
+    at: log.createdAt,
+    tone: log.level,
+    title: `${log.source || 'Sistem'} • ${log.level.toUpperCase()}`,
+    detail: log.dataPreview ? `${log.message} • ${log.dataPreview}` : log.message,
+  }))
+
+  const fromNotes = snapshot.notes.map((note) => ({
+    id: `note-${note.id}`,
+    at: note.createdAt,
+    tone: 'info' as const,
+    title: `Not • ${note.symbol || note.instrumentId}`,
+    detail: note.text.slice(0, 180),
+  }))
+
+  const fromAlerts = snapshot.alerts.map((alert) => ({
+    id: `alert-${alert.id}`,
+    at: alert.createdAt,
+    tone: 'warn' as const,
+    title: `Fiyat alarmı • ${alert.symbol || alert.instrumentId}`,
+    detail: `Hedef fiyat: ${alert.price}`,
+  }))
+
+  const fromPositions = snapshot.positions.map((position) => ({
+    id: `position-${position.id}`,
+    at: position.addedAt,
+    tone: 'info' as const,
+    title: `Pozisyon • ${position.instrumentId}`,
+    detail: `${position.quantity.toFixed(4)} adet • Ortalama $${position.averageCost.toFixed(2)}`,
+  }))
+
+  const fromWalletTransfers = snapshot.botWalletTransfers.map((transfer) => ({
+    id: `wallet-transfer-${transfer.id}`,
+    at: transfer.createdAt,
+    tone: transfer.direction === 'in' ? ('success' as const) : ('warn' as const),
+    title: `Bot Cüzdan • ${transfer.direction === 'in' ? 'Giriş' : 'Çıkış'}`,
+    detail: `${transfer.source} • Brüt ${transfer.amount.toFixed(2)} • Net ${transfer.netAmount.toFixed(2)}${transfer.convertedAmount != null ? ` • Karşılık ${transfer.convertedAmount.toFixed(2)} ${transfer.currency}` : ''}`,
+  }))
+
+  return [
+    ...fromTrades,
+    ...fromWalletTransfers,
+    ...fromOrders,
+    ...fromTickets,
+    ...fromLogins,
+    ...fromActivity,
+    ...fromNotes,
+    ...fromAlerts,
+    ...fromPositions,
+  ]
+    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+    .slice(0, 240)
 }
 
 const ADMIN_THEME_KEY = 'fintech-admin-theme'
@@ -335,6 +496,7 @@ export default function AdminApp() {
           <Route path="/egitim" element={<ContentGeneratorPage session={session} />} />
           <Route path="/mesajlar" element={<MessagesPage tickets={tickets} onTicketsChange={setTickets} />} />
           <Route path="/kullanicilar" element={<UsersPage session={session} />} />
+          <Route path="/kontrol" element={<ControlCenterPage session={session} />} />
           <Route path="/loglar" element={<LogsPage />} />
           <Route path="/bot" element={<BotMonitorPage session={session} />} />
           <Route path="*" element={<Navigate to="/" replace />} />
@@ -437,6 +599,7 @@ const adminNavItems = [
   { path: '/egitim', label: 'İçerik Üretici', icon: BookOpen },
   { path: '/mesajlar', label: 'Mesajlar', icon: Mail },
   { path: '/kullanicilar', label: 'Kullanıcılar', icon: Users },
+  { path: '/kontrol', label: 'Kontrol Ünitesi', icon: Eye },
   { path: '/loglar', label: 'Sistem Logları', icon: Activity },
   { path: '/bot', label: 'Bot Monitörü', icon: Bot },
 ]
@@ -1491,6 +1654,9 @@ function UsersPage({ session }: { session: SessionUser }) {
   const [resetForUser, setResetForUser] = useState<string | null>(null)
   const [resetValue, setResetValue] = useState('')
   const [resetMsg, setResetMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null)
+  const [roleDraft, setRoleDraft] = useState<Record<string, 'admin' | 'user'>>({})
+  const [roleSavingForUser, setRoleSavingForUser] = useState<string | null>(null)
+  const [roleMsg, setRoleMsg] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null)
 
   const [showCreate, setShowCreate] = useState(false)
   const [newName, setNewName] = useState('')
@@ -1508,6 +1674,11 @@ function UsersPage({ session }: { session: SessionUser }) {
   async function refresh() {
     const u = await getUsers()
     setUsers(u)
+    setRoleDraft(
+      Object.fromEntries(
+        u.map((item) => [item.id, item.role]),
+      ) as Record<string, 'admin' | 'user'>,
+    )
   }
 
   async function handleDelete(id: string) {
@@ -1561,6 +1732,21 @@ function UsersPage({ session }: { session: SessionUser }) {
     setNewEmail('')
     setNewPassword('')
     setNewRole('user')
+    await refresh()
+  }
+
+  async function handleRoleSave(userId: string) {
+    const targetRole = roleDraft[userId]
+    if (!targetRole) return
+    setRoleMsg(null)
+    setRoleSavingForUser(userId)
+    const ok = await setUserRole(userId, targetRole)
+    setRoleSavingForUser(null)
+    if (!ok) {
+      setRoleMsg({ tone: 'err', text: 'Rol güncellenemedi.' })
+      return
+    }
+    setRoleMsg({ tone: 'ok', text: 'Kullanıcı rolü güncellendi.' })
     await refresh()
   }
 
@@ -1717,6 +1903,34 @@ function UsersPage({ session }: { session: SessionUser }) {
               >
                 {u.role === 'admin' ? 'Admin' : 'Kullanıcı'}
               </span>
+              <label className="admin-field admin-role-inline">
+                <span>Rol</span>
+                <select
+                  className="admin-select"
+                  value={roleDraft[u.id] ?? u.role}
+                  disabled={u.id === session.id}
+                  onChange={(e) =>
+                    setRoleDraft((current) => ({
+                      ...current,
+                      [u.id]: e.target.value as 'admin' | 'user',
+                    }))
+                  }
+                >
+                  <option value="user">Kullanıcı</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </label>
+              {roleDraft[u.id] !== u.role && (
+                <button
+                  type="button"
+                  className="admin-primary-btn"
+                  onClick={() => { void handleRoleSave(u.id) }}
+                  disabled={roleSavingForUser === u.id || u.id === session.id}
+                >
+                  {roleSavingForUser === u.id ? <RefreshCw size={14} className="admin-spin" /> : <Save size={14} />}
+                  {roleSavingForUser === u.id ? 'Kaydediliyor' : 'Rolü Kaydet'}
+                </button>
+              )}
               <button
                 type="button"
                 className="admin-ghost-btn"
@@ -1740,6 +1954,752 @@ function UsersPage({ session }: { session: SessionUser }) {
             </div>
           ))}
         </div>
+        {roleMsg && (
+          <div style={{ marginTop: 10 }}>
+            <span className={roleMsg.tone === 'ok' ? 'admin-badge green' : 'admin-badge red'}>
+              {roleMsg.text}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
+function ControlCenterPage({ session }: { session: SessionUser }) {
+  const [users, setUsers] = useState<AuthUser[]>([])
+  const [selectedUserId, setSelectedUserId] = useState('')
+  const [search, setSearch] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [syncAt, setSyncAt] = useState<string | null>(null)
+  const [snapshot, setSnapshot] = useState<UserControlSnapshot | null>(null)
+  const [confirmAction, setConfirmAction] = useState<UserControlActionTarget | null>(null)
+
+  const refreshUsers = useCallback(async () => {
+    const list = await getUsers()
+    setUsers(list)
+    setSelectedUserId((current) => {
+      if (list.length === 0) return ''
+      if (current && list.some((u) => u.id === current)) return current
+      return list[0].id
+    })
+  }, [])
+
+  const refreshSnapshot = useCallback(async (userId: string, silent = false) => {
+    if (!userId) {
+      setSnapshot(null)
+      return
+    }
+
+    if (!silent) setLoading(true)
+
+    const [positions, wallet, pendingOrders, notes, alerts, watchlist, botTrades, botWalletTransfers, loginHistory] =
+      await Promise.all([
+        fetchPositions(userId),
+        fetchPortfolioWallet(userId),
+        fetchPendingLimitOrders(userId),
+        fetchNotes(userId),
+        fetchAlerts(userId),
+        fetchWatchlist(userId),
+        fetchBotTrades(userId, 200),
+        fetchBotWalletTransfers(userId, 200),
+        getLoginHistoryForUser(userId),
+      ])
+
+    const [
+      { data: profileData, error: profileError },
+      { data: ticketsData, error: ticketsError },
+      { data: activityData, error: activityError },
+    ] = await Promise.all([
+      supabase
+        .from('profiles')
+        .select('bio, preferred_currency')
+        .eq('id', userId)
+        .maybeSingle<{ bio: string | null; preferred_currency: string | null }>(),
+      supabase
+        .from('support_tickets')
+        .select('id, subject, message, email, status, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(120),
+      supabase
+        .from('activity_logs')
+        .select('id, level, source, message, data, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(160),
+    ])
+
+    if (profileError) {
+      console.error('[admin-control] profile fetch failed', profileError)
+    }
+    if (ticketsError) {
+      console.error('[admin-control] tickets fetch failed', ticketsError)
+    }
+    if (activityError) {
+      console.error('[admin-control] activity logs fetch failed', activityError)
+    }
+
+    const tickets: UserControlTicket[] = (ticketsData ?? []).map((row) => ({
+      id: String(row.id),
+      subject: String(row.subject ?? ''),
+      message: String(row.message ?? ''),
+      email: String(row.email ?? ''),
+      status: (row.status as 'open' | 'closed') ?? 'open',
+      createdAt: String(row.created_at),
+    }))
+
+    const activityLogs: UserControlActivityLog[] = (activityData ?? []).map((row) => {
+      const safeLevel =
+        row.level === 'warn' ||
+        row.level === 'error' ||
+        row.level === 'success' ||
+        row.level === 'trade'
+          ? row.level
+          : 'info'
+      return {
+        id: String(row.id),
+        level: safeLevel,
+        source: String(row.source ?? ''),
+        message: String(row.message ?? ''),
+        dataPreview: toDataPreview(row.data),
+        createdAt: String(row.created_at),
+      }
+    })
+
+    setSnapshot({
+      wallet: wallet ? { cashBalance: wallet.cashBalance, withdrawnTotal: wallet.withdrawnTotal } : null,
+      positions,
+      pendingOrders,
+      notes,
+      alerts,
+      watchlist,
+      botTrades,
+      botWalletTransfers,
+      tickets,
+      loginHistory,
+      activityLogs,
+      profileExtras: {
+        bio: profileData?.bio ?? '',
+        preferredCurrency: profileData?.preferred_currency ?? 'TRY',
+      },
+    })
+    setSyncAt(new Date().toISOString())
+    setLoading(false)
+  }, [])
+
+  useEffect(() => {
+    void refreshUsers()
+  }, [refreshUsers])
+
+  useEffect(() => {
+    if (!selectedUserId) {
+      setSnapshot(null)
+      return
+    }
+    void refreshSnapshot(selectedUserId)
+  }, [selectedUserId, refreshSnapshot])
+
+  useEffect(() => {
+    if (!selectedUserId) return
+
+    let queueHandle: ReturnType<typeof setTimeout> | null = null
+    const queueRefresh = () => {
+      if (queueHandle) clearTimeout(queueHandle)
+      queueHandle = setTimeout(() => {
+        void refreshSnapshot(selectedUserId, true)
+      }, 280)
+    }
+
+    const channel = supabase
+      .channel(`admin-control-${selectedUserId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'profiles', filter: `id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'positions', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'portfolio_wallets', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'pending_limit_orders', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'watchlist', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'notes', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'price_alerts', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'bot_trades', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'bot_wallet_transfers', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'support_tickets', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'login_history', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .subscribe()
+
+    return () => {
+      if (queueHandle) clearTimeout(queueHandle)
+      void supabase.removeChannel(channel)
+    }
+  }, [selectedUserId, refreshSnapshot])
+
+  const selectedUser = useMemo(
+    () => users.find((u) => u.id === selectedUserId) ?? null,
+    [users, selectedUserId],
+  )
+
+  const filteredUsers = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return users
+    return users.filter((user) => {
+      const text = `${user.name} ${user.username} ${user.email} ${user.id}`.toLowerCase()
+      return text.includes(q)
+    })
+  }, [search, users])
+
+  const timeline = useMemo(() => {
+    if (!snapshot) return []
+    return buildUserControlTimeline(snapshot)
+  }, [snapshot])
+
+  async function handleDeletePendingOrder(orderId: string) {
+    if (!selectedUserId) return
+    if (confirmAction?.type !== 'order' || confirmAction.id !== orderId) {
+      setConfirmAction({ type: 'order', id: orderId })
+      return
+    }
+    await dbDeletePendingLimitOrder(selectedUserId, orderId)
+    setConfirmAction(null)
+    await refreshSnapshot(selectedUserId, true)
+  }
+
+  async function handleDeleteNote(noteId: string) {
+    if (!selectedUserId) return
+    if (confirmAction?.type !== 'note' || confirmAction.id !== noteId) {
+      setConfirmAction({ type: 'note', id: noteId })
+      return
+    }
+    await dbDeleteNote(selectedUserId, noteId)
+    setConfirmAction(null)
+    await refreshSnapshot(selectedUserId, true)
+  }
+
+  async function handleDeleteAlert(alertId: string) {
+    if (!selectedUserId) return
+    if (confirmAction?.type !== 'alert' || confirmAction.id !== alertId) {
+      setConfirmAction({ type: 'alert', id: alertId })
+      return
+    }
+    await dbDeleteAlert(selectedUserId, alertId)
+    setConfirmAction(null)
+    await refreshSnapshot(selectedUserId, true)
+  }
+
+  async function handleRemoveWatch(instrumentId: string) {
+    if (!selectedUserId) return
+    if (confirmAction?.type !== 'watch' || confirmAction.id !== instrumentId) {
+      setConfirmAction({ type: 'watch', id: instrumentId })
+      return
+    }
+    await removeWatchlistItem(selectedUserId, instrumentId)
+    setConfirmAction(null)
+    await refreshSnapshot(selectedUserId, true)
+  }
+
+  async function handleDeleteWalletTransfer(transferId: string) {
+    if (!selectedUserId) return
+    if (confirmAction?.type !== 'transfer' || confirmAction.id !== transferId) {
+      setConfirmAction({ type: 'transfer', id: transferId })
+      return
+    }
+    await deleteBotWalletTransfer(selectedUserId, transferId)
+    setConfirmAction(null)
+    await refreshSnapshot(selectedUserId, true)
+  }
+
+  const colorByLevel: Record<UserControlTimelineItem['tone'], string> = {
+    info: '#3b82f6',
+    warn: '#f59e0b',
+    error: '#ef4444',
+    success: '#10b981',
+    trade: '#a855f7',
+  }
+
+  return (
+    <div className="admin-page-stack">
+      <div className="admin-page-header">
+        <div>
+          <p className="admin-eyebrow">Canlı Denetim</p>
+          <h2>Sistem Kontrol Ünitesi</h2>
+          <p className="admin-muted">
+            Kullanıcı bazlı kayıt bilgileri, alım-satım ve tüm sistem hareketleri tek panelde anlık izlenir.
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            type="button"
+            className="admin-ghost-btn"
+            onClick={() => {
+              void refreshUsers()
+              if (selectedUserId) void refreshSnapshot(selectedUserId)
+            }}
+          >
+            <RefreshCw size={14} /> Yenile
+          </button>
+          <span className="admin-badge green">Canlı izleme açık</span>
+        </div>
+      </div>
+
+      <div className="admin-control-layout">
+        <aside className="admin-card admin-control-users-card">
+          <div className="admin-card-head" style={{ marginBottom: 12 }}>
+            <Users size={16} />
+            <h3>Kullanıcılar ({users.length})</h3>
+          </div>
+          <label className="admin-field" style={{ marginBottom: 10 }}>
+            <span>Ara</span>
+            <input
+              type="text"
+              placeholder="Ad, kullanıcı adı, e-posta..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </label>
+          <div className="admin-control-user-list">
+            {filteredUsers.map((user) => {
+              const isSelf = user.id === session.id
+              return (
+                <button
+                  key={user.id}
+                  type="button"
+                  className={selectedUserId === user.id ? 'admin-control-user-btn is-active' : 'admin-control-user-btn'}
+                  onClick={() => {
+                    setSelectedUserId(user.id)
+                    setConfirmAction(null)
+                  }}
+                >
+                  <span className="admin-user-ava" style={{ width: 34, height: 34 }}>
+                    {user.photoData ? <img src={user.photoData} alt={user.name} /> : <span>{user.avatar}</span>}
+                  </span>
+                  <span className="admin-control-user-meta">
+                    <strong>{user.name}</strong>
+                    <small>@{user.username}</small>
+                  </span>
+                  {isSelf && <span className="admin-badge blue">Sen</span>}
+                  <span className={user.role === 'admin' ? 'admin-badge blue' : 'admin-badge gray'}>
+                    {user.role === 'admin' ? 'Admin' : 'Kullanıcı'}
+                  </span>
+                </button>
+              )
+            })}
+            {filteredUsers.length === 0 && (
+              <div className="admin-empty" style={{ padding: 16 }}>
+                <p>Eşleşen kullanıcı yok.</p>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <section className="admin-control-main">
+          {!selectedUser || !snapshot ? (
+            <div className="admin-card">
+              <div className="admin-empty">
+                <Eye size={28} />
+                <p>{loading ? 'Kullanıcı verileri yükleniyor...' : 'Kontrol etmek için bir kullanıcı seçin.'}</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="admin-stats-grid admin-control-stats-grid">
+                <div className="admin-stat-card" style={{ '--stat-color': '#3b82f6' } as React.CSSProperties}>
+                  <div className="admin-stat-icon"><Users size={18} /></div>
+                  <div>
+                    <strong className="admin-stat-value">{snapshot.positions.length}</strong>
+                    <p className="admin-stat-label">Pozisyon</p>
+                  </div>
+                </div>
+                <div className="admin-stat-card" style={{ '--stat-color': '#a855f7' } as React.CSSProperties}>
+                  <div className="admin-stat-icon"><Bot size={18} /></div>
+                  <div>
+                    <strong className="admin-stat-value">{snapshot.botTrades.length}</strong>
+                    <p className="admin-stat-label">Bot İşlemi</p>
+                  </div>
+                </div>
+                <div className="admin-stat-card" style={{ '--stat-color': '#f59e0b' } as React.CSSProperties}>
+                  <div className="admin-stat-icon"><Mail size={18} /></div>
+                  <div>
+                    <strong className="admin-stat-value">
+                      {snapshot.tickets.filter((ticket) => ticket.status === 'open').length}
+                    </strong>
+                    <p className="admin-stat-label">Açık Talep</p>
+                  </div>
+                </div>
+                <div className="admin-stat-card" style={{ '--stat-color': '#10b981' } as React.CSSProperties}>
+                  <div className="admin-stat-icon"><TrendingUp size={18} /></div>
+                  <div>
+                    <strong className="admin-stat-value">
+                      ${(snapshot.wallet?.cashBalance ?? 0).toLocaleString('tr-TR', { maximumFractionDigits: 0 })}
+                    </strong>
+                    <p className="admin-stat-label">Nakit</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="admin-card">
+                <div className="admin-card-head">
+                  <ShieldCheck size={16} />
+                  <h3>Kullanıcı Kayıt Bilgileri</h3>
+                  {syncAt && <span className="admin-badge gray">Senkron: {new Date(syncAt).toLocaleTimeString('tr-TR')}</span>}
+                </div>
+                <div className="admin-control-meta-grid">
+                  <div className="admin-control-meta-item">
+                    <span>Kullanıcı ID</span>
+                    <strong>{selectedUser.id}</strong>
+                  </div>
+                  <div className="admin-control-meta-item">
+                    <span>Ad Soyad</span>
+                    <strong>{selectedUser.name}</strong>
+                  </div>
+                  <div className="admin-control-meta-item">
+                    <span>Kullanıcı Adı</span>
+                    <strong>@{selectedUser.username}</strong>
+                  </div>
+                  <div className="admin-control-meta-item">
+                    <span>E-posta</span>
+                    <strong>{selectedUser.email || 'Belirtilmemiş'}</strong>
+                  </div>
+                  <div className="admin-control-meta-item">
+                    <span>Rol</span>
+                    <strong>{selectedUser.role === 'admin' ? 'Admin' : 'Kullanıcı'}</strong>
+                  </div>
+                  <div className="admin-control-meta-item">
+                    <span>Kayıt Tarihi</span>
+                    <strong>{new Date(selectedUser.createdAt).toLocaleString('tr-TR')}</strong>
+                  </div>
+                  <div className="admin-control-meta-item">
+                    <span>Son Giriş</span>
+                    <strong>{selectedUser.lastLoginAt ? new Date(selectedUser.lastLoginAt).toLocaleString('tr-TR') : 'Yok'}</strong>
+                  </div>
+                  <div className="admin-control-meta-item">
+                    <span>Tercih Edilen Para</span>
+                    <strong>{snapshot.profileExtras.preferredCurrency}</strong>
+                  </div>
+                  <div className="admin-control-meta-item">
+                    <span>Biyografi</span>
+                    <strong>{snapshot.profileExtras.bio || '-'}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div className="admin-control-two-col">
+                <div className="admin-card">
+                  <div className="admin-card-head">
+                    <FileText size={16} />
+                    <h3>Portföy Pozisyonları ({snapshot.positions.length})</h3>
+                  </div>
+                  {snapshot.positions.length === 0 ? (
+                    <div className="admin-empty" style={{ padding: 20 }}>
+                      <p>Pozisyon yok.</p>
+                    </div>
+                  ) : (
+                    <div className="admin-control-list">
+                      {snapshot.positions.map((position) => (
+                        <div key={position.id} className="admin-control-row">
+                          <div>
+                            <strong>{position.instrumentId}</strong>
+                            <small>{new Date(position.addedAt).toLocaleString('tr-TR')}</small>
+                          </div>
+                          <div className="admin-control-row-right">
+                            <span>{position.quantity.toFixed(4)} adet</span>
+                            <span>@ ${position.averageCost.toFixed(2)}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="admin-card">
+                  <div className="admin-card-head">
+                    <Zap size={16} />
+                    <h3>Bekleyen Limit Emirler ({snapshot.pendingOrders.length})</h3>
+                  </div>
+                  {snapshot.pendingOrders.length === 0 ? (
+                    <div className="admin-empty" style={{ padding: 20 }}>
+                      <p>Bekleyen limit emri yok.</p>
+                    </div>
+                  ) : (
+                    <div className="admin-control-list">
+                      {snapshot.pendingOrders.map((order) => {
+                        const isConfirming = confirmAction?.type === 'order' && confirmAction.id === order.id
+                        return (
+                          <div key={order.id} className="admin-control-row">
+                            <div>
+                              <strong>{order.symbol || order.instrumentId}</strong>
+                              <small>{order.quantity.toFixed(4)} adet • Limit ${order.limitPrice.toFixed(2)}</small>
+                            </div>
+                            <div className="admin-control-row-right">
+                              <button type="button" className={isConfirming ? 'admin-danger-btn' : 'admin-ghost-btn'} onClick={() => { void handleDeletePendingOrder(order.id) }}>
+                                <Trash2 size={12} /> {isConfirming ? 'Onayla' : 'İptal Et'}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="admin-control-two-col">
+                <div className="admin-card">
+                  <div className="admin-card-head">
+                    <AlertTriangle size={16} />
+                    <h3>Notlar ({snapshot.notes.length}) & Alarmlar ({snapshot.alerts.length})</h3>
+                  </div>
+                  <div className="admin-control-subtitle">Notlar</div>
+                  {snapshot.notes.length === 0 ? (
+                    <p className="admin-muted">Not bulunmuyor.</p>
+                  ) : (
+                    <div className="admin-control-list">
+                      {snapshot.notes.map((note) => {
+                        const isConfirming = confirmAction?.type === 'note' && confirmAction.id === note.id
+                        return (
+                          <div key={note.id} className="admin-control-row">
+                            <div>
+                              <strong>{note.symbol || note.instrumentId}</strong>
+                              <small>{note.text.slice(0, 90)}</small>
+                            </div>
+                            <div className="admin-control-row-right">
+                              <button type="button" className={isConfirming ? 'admin-danger-btn' : 'admin-ghost-btn'} onClick={() => { void handleDeleteNote(note.id) }}>
+                                <Trash2 size={12} /> {isConfirming ? 'Onayla' : 'Sil'}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                  <div className="admin-control-subtitle">Fiyat Alarmları</div>
+                  {snapshot.alerts.length === 0 ? (
+                    <p className="admin-muted">Alarm bulunmuyor.</p>
+                  ) : (
+                    <div className="admin-control-list">
+                      {snapshot.alerts.map((alert) => {
+                        const isConfirming = confirmAction?.type === 'alert' && confirmAction.id === alert.id
+                        return (
+                          <div key={alert.id} className="admin-control-row">
+                            <div>
+                              <strong>{alert.symbol || alert.instrumentId}</strong>
+                              <small>Hedef fiyat: {alert.price}</small>
+                            </div>
+                            <div className="admin-control-row-right">
+                              <button type="button" className={isConfirming ? 'admin-danger-btn' : 'admin-ghost-btn'} onClick={() => { void handleDeleteAlert(alert.id) }}>
+                                <Trash2 size={12} /> {isConfirming ? 'Onayla' : 'Sil'}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="admin-card">
+                  <div className="admin-card-head">
+                    <BookOpen size={16} />
+                    <h3>Watchlist ({snapshot.watchlist.length})</h3>
+                  </div>
+                  {snapshot.watchlist.length === 0 ? (
+                    <div className="admin-empty" style={{ padding: 20 }}>
+                      <p>Watchlist boş.</p>
+                    </div>
+                  ) : (
+                    <div className="admin-control-watchlist">
+                      {snapshot.watchlist.map((instrumentId) => {
+                        const isConfirming =
+                          confirmAction?.type === 'watch' && confirmAction.id === instrumentId
+                        return (
+                          <button
+                            key={instrumentId}
+                            type="button"
+                            className={isConfirming ? 'admin-danger-btn' : 'admin-ghost-btn'}
+                            onClick={() => {
+                              void handleRemoveWatch(instrumentId)
+                            }}
+                          >
+                            {isConfirming ? `Onayla: ${instrumentId}` : `Sil: ${instrumentId}`}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="admin-control-two-col">
+                <div className="admin-card">
+                  <div className="admin-card-head">
+                    <Bot size={16} />
+                    <h3>Bot İşlemleri ({snapshot.botTrades.length})</h3>
+                  </div>
+                  {snapshot.botTrades.length === 0 ? (
+                    <div className="admin-empty" style={{ padding: 20 }}>
+                      <p>Kayıtlı bot işlemi yok.</p>
+                    </div>
+                  ) : (
+                    <div className="admin-control-list">
+                      {snapshot.botTrades.slice(0, 80).map((trade) => (
+                        <div key={trade.id} className="admin-control-row">
+                          <div>
+                            <strong>{trade.side === 'buy' ? 'AL' : 'SAT'} • {trade.instrumentId}</strong>
+                            <small>{new Date(trade.createdAt).toLocaleString('tr-TR')}</small>
+                          </div>
+                          <div className="admin-control-row-right">
+                            <span>{trade.quantity.toFixed(4)} adet</span>
+                            <span>${trade.price.toFixed(2)}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="admin-control-subtitle">Bot cüzdan transferleri ({snapshot.botWalletTransfers.length})</div>
+                  {snapshot.botWalletTransfers.length === 0 ? (
+                    <p className="admin-muted">Transfer kaydı yok.</p>
+                  ) : (
+                    <div className="admin-control-list">
+                      {snapshot.botWalletTransfers.slice(0, 60).map((transfer) => {
+                        const isConfirming = confirmAction?.type === 'transfer' && confirmAction.id === transfer.id
+                        return (
+                          <div key={transfer.id} className="admin-control-row">
+                            <div>
+                              <strong>
+                                {transfer.direction === 'in' ? 'Giriş' : 'Çıkış'} • {transfer.source}
+                              </strong>
+                              <small>
+                                Brüt ${transfer.amount.toFixed(2)} • Net ${transfer.netAmount.toFixed(2)}
+                                {transfer.exchangeRate != null && transfer.convertedAmount != null
+                                  ? ` • Kur ${transfer.exchangeRate.toFixed(4)} • Karşılık ${transfer.convertedAmount.toFixed(2)} ${transfer.currency}`
+                                  : ''}
+                                {' • '}
+                                {new Date(transfer.createdAt).toLocaleString('tr-TR')}
+                              </small>
+                            </div>
+                            <div className="admin-control-row-right">
+                              <button type="button" className={isConfirming ? 'admin-danger-btn' : 'admin-ghost-btn'} onClick={() => { void handleDeleteWalletTransfer(transfer.id) }}>
+                                <Trash2 size={12} /> {isConfirming ? 'Onayla' : 'Sil'}
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="admin-card">
+                  <div className="admin-card-head">
+                    <Mail size={16} />
+                    <h3>Destek Talepleri ({snapshot.tickets.length})</h3>
+                  </div>
+                  {snapshot.tickets.length === 0 ? (
+                    <div className="admin-empty" style={{ padding: 20 }}>
+                      <p>Destek talebi yok.</p>
+                    </div>
+                  ) : (
+                    <div className="admin-control-list">
+                      {snapshot.tickets.slice(0, 80).map((ticket) => (
+                        <div key={ticket.id} className="admin-control-row">
+                          <div>
+                            <strong>{ticket.subject}</strong>
+                            <small>{ticket.email || 'E-posta yok'} • {new Date(ticket.createdAt).toLocaleString('tr-TR')}</small>
+                          </div>
+                          <div className="admin-control-row-right">
+                            <span className={ticket.status === 'open' ? 'admin-badge yellow' : 'admin-badge green'}>
+                              {ticket.status === 'open' ? 'Açık' : 'Kapalı'}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="admin-card">
+                <div className="admin-card-head">
+                  <Activity size={16} />
+                  <h3>Zaman Tüneli (Canlı) • {timeline.length} kayıt</h3>
+                </div>
+                {timeline.length === 0 ? (
+                  <div className="admin-empty" style={{ padding: 20 }}>
+                    <p>Henüz kullanıcı aktivitesi görünmüyor.</p>
+                  </div>
+                ) : (
+                  <div className="admin-log-list">
+                    {timeline.map((item) => (
+                      <div key={item.id} className="admin-log-item">
+                        <span
+                          className="admin-log-level-dot"
+                          style={{ background: colorByLevel[item.tone] }}
+                        />
+                        <span
+                          className="admin-log-lvl"
+                          style={{ color: colorByLevel[item.tone] }}
+                        >
+                          {item.tone.toUpperCase()}
+                        </span>
+                        <span className="admin-log-src">{item.title}</span>
+                        <span className="admin-log-time">{new Date(item.at).toLocaleString('tr-TR')}</span>
+                        <span className="admin-log-msg">{item.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </section>
       </div>
     </div>
   )
@@ -1850,19 +2810,103 @@ type AdminBotState = {
   lastRunAt?: string | null
 }
 
-function BotMonitorPage({ session }: { session: SessionUser }) {
+function BotMonitorPage({ session: _session }: { session: SessionUser }) {
+  const [users, setUsers] = useState<AuthUser[]>([])
+  const [selectedUserId, setSelectedUserId] = useState('')
   const [botState, setBotState] = useState<AdminBotState>({})
+  const [botTrades, setBotTrades] = useState<DbBotTrade[]>([])
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    void refresh()
+    let cancelled = false
+    void (async () => {
+      const list = await getUsers()
+      if (cancelled) return
+      setUsers(list)
+      setSelectedUserId((current) => {
+        if (current && list.some((u) => u.id === current)) return current
+        const preferred = list.find((u) => u.role !== 'admin')
+        return preferred?.id ?? list[0]?.id ?? ''
+      })
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [])
 
-  async function refresh() {
-    const data = await fetchBotState<AdminBotState>(session.id)
-    setBotState(data ?? {})
-  }
+  const refresh = useCallback(async (userId = selectedUserId, silent = false) => {
+    if (!userId) {
+      setBotState({})
+      setBotTrades([])
+      return
+    }
+    if (!silent) setLoading(true)
+    const [stateData, tradesData] = await Promise.all([
+      fetchBotState<AdminBotState>(userId),
+      fetchBotTrades(userId, 300),
+    ])
+    setBotState(stateData ?? {})
+    setBotTrades(tradesData)
+    if (!silent) setLoading(false)
+  }, [selectedUserId])
 
-  const trades = botState.trades ?? []
+  useEffect(() => {
+    if (!selectedUserId) return
+    void refresh(selectedUserId)
+  }, [selectedUserId, refresh])
+
+  useEffect(() => {
+    if (!selectedUserId) return
+    let queueHandle: ReturnType<typeof setTimeout> | null = null
+    const queueRefresh = () => {
+      if (queueHandle) clearTimeout(queueHandle)
+      queueHandle = setTimeout(() => {
+        void refresh(selectedUserId, true)
+      }, 250)
+    }
+    const channel = supabase
+      .channel(`admin-bot-monitor-${selectedUserId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'bot_trades', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'bot_state', filter: `user_id=eq.${selectedUserId}` },
+        queueRefresh,
+      )
+      .subscribe()
+
+    return () => {
+      if (queueHandle) clearTimeout(queueHandle)
+      void supabase.removeChannel(channel)
+    }
+  }, [selectedUserId, refresh])
+
+  const selectedUser = users.find((u) => u.id === selectedUserId) ?? null
+  const tradesFromState = botState.trades ?? []
+  const trades: Array<{
+    id?: string
+    side: string
+    symbol: string
+    price: number
+    timestamp: string
+    quantity: number
+    confidence: number
+    reason: string
+  }> = botTrades.length > 0
+    ? botTrades.map((trade) => ({
+        id: trade.id,
+        side: trade.side,
+        symbol: trade.instrumentId,
+        price: trade.price,
+        timestamp: trade.createdAt,
+        quantity: trade.quantity,
+        confidence: trade.confidence ?? 0,
+        reason: trade.reason ?? '',
+      }))
+    : tradesFromState.map((trade) => ({ ...trade, id: undefined }))
   const equity = botState.equityHistory ?? []
   const lastPoint = equity[equity.length - 1]
   const firstPoint = equity[0]
@@ -1874,12 +2918,37 @@ function BotMonitorPage({ session }: { session: SessionUser }) {
       <div className="admin-page-header">
         <div>
           <p className="admin-eyebrow">Bot Monitörü</p>
-          <h2>Trade Bot Durumu</h2>
+          <h2>Trade Bot Durumu {selectedUser ? `· ${selectedUser.name}` : ''}</h2>
         </div>
-        <button type="button" className="admin-ghost-btn" onClick={refresh}>
-          <RefreshCw size={14} /> Yenile
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <select
+            className="admin-select"
+            value={selectedUserId}
+            onChange={(e) => setSelectedUserId(e.target.value)}
+          >
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name} (@{u.username})
+              </option>
+            ))}
+          </select>
+          <button type="button" className="admin-ghost-btn" onClick={() => { void refresh(selectedUserId) }}>
+            <RefreshCw size={14} className={loading ? 'admin-spin' : ''} /> Yenile
+          </button>
+        </div>
       </div>
+
+      {!selectedUser && (
+        <div className="admin-card">
+          <div className="admin-empty">
+            <Users size={26} />
+            <p>İzlenecek kullanıcı bulunamadı.</p>
+          </div>
+        </div>
+      )}
+
+      {selectedUser && (
+        <>
 
       <div className="admin-stats-grid">
         {[
@@ -1920,7 +2989,7 @@ function BotMonitorPage({ session }: { session: SessionUser }) {
       <div className="admin-card">
         <div className="admin-card-head">
           <Bot size={18} />
-          <h3>Son {trades.length} İşlem</h3>
+          <h3>{selectedUser.name} · Son {trades.length} İşlem</h3>
         </div>
         {trades.length === 0 ? (
           <div className="admin-empty">
@@ -1933,7 +3002,7 @@ function BotMonitorPage({ session }: { session: SessionUser }) {
               .reverse()
               .slice(0, 50)
               .map((t, i) => (
-                <div key={i} className="admin-log-item">
+                <div key={t.id ?? i} className="admin-log-item">
                   <span
                     className="admin-log-level-dot"
                     style={{ background: t.side === 'buy' ? '#10b981' : '#ef4444' }}
@@ -1956,8 +3025,11 @@ function BotMonitorPage({ session }: { session: SessionUser }) {
           </div>
         )}
       </div>
+      </>
+      )}
     </div>
   )
 }
+
 
 
