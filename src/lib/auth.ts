@@ -389,7 +389,10 @@ export async function updateUserProfile(
   if (updates.bio !== undefined) row.bio = updates.bio
   if (updates.preferred_currency !== undefined) row.preferred_currency = updates.preferred_currency
   if (Object.keys(row).length === 0) return
-  await supabase.from('profiles').update(row).eq('id', userId)
+  const { error } = await supabase.from('profiles').update(row).eq('id', userId)
+  if (error) {
+    throw new Error(error.message)
+  }
   if (cachedSessionUser?.id === userId) {
     cachedSessionUser = { ...cachedSessionUser, ...rowApplyToSession(row) }
   }

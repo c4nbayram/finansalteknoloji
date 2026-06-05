@@ -242,7 +242,7 @@ const avatarOptions = [
 const avatarOptionMap = new Map<string, string>(avatarOptions.map((option) => [option.id, option.icon]))
 const currencyOptions: Array<Profile['preferredCurrency']> = ['TRY', 'USD', 'EUR']
 
-const overviewInstrumentIds = ['aapl', 'btcusd', 'xauusd', 'usdtry']
+const overviewInstrumentIds = ['aapl', 'btcusd', 'xauusd', 'usdtry', 'eurtry']
 
 const positionPalette = ['#3b82f6', '#10b981', '#f59e0b', '#a855f7', '#ec4899', '#14b8a6']
 
@@ -1697,6 +1697,19 @@ function App() {
         body: botStatus.text,
       })
     }
+    botActivity
+      .filter((event) => event.kind === 'trade')
+      .slice(0, 5)
+      .forEach((event) => {
+        items.push({
+          id: `bot-trade-${event.id}`,
+          tone: 'ok',
+          title: `${event.side === 'buy' ? 'Bot alım yaptı' : 'Bot satım yaptı'}${
+            event.symbol ? ` · ${event.symbol}` : ''
+          }`,
+          body: `${event.detail} · ${formatTime(event.at)}`,
+        })
+      })
     if (alertPrice) {
       items.push({
         id: 'alert-set',
@@ -1724,6 +1737,7 @@ function App() {
     return items
   }, [
     alertPrice,
+    botActivity,
     botConfig.intervalSeconds,
     botRunning,
     botStatus,
@@ -1750,6 +1764,7 @@ function App() {
     alertPrice,
     setAlertPrice,
     failedQuotes,
+    botActivity,
     loadedQuotesCount,
     overviewQuoteMap,
     liveQuoteByInstrument: quoteMap,
@@ -2112,6 +2127,7 @@ type SharedPageProps = {
   alertPrice: string
   setAlertPrice: (value: string) => void
   failedQuotes: QuoteData[]
+  botActivity: ActivityEvent[]
   loadedQuotesCount: number
   overviewQuoteMap: Map<MarketTabId, QuoteData>
   liveQuoteByInstrument: Map<string, QuoteData>
@@ -4241,7 +4257,8 @@ function PortfolioPage({
   )
 }
 
-function AlertsPage({ selectedAssetQuote, alertPrice, failedQuotes, watchlistQuotes }: SharedPageProps) {
+function AlertsPage({ selectedAssetQuote, alertPrice, failedQuotes, botActivity, watchlistQuotes }: SharedPageProps) {
+  const botTrades = botActivity.filter((event) => event.kind === 'trade')
   return (
     <div className="page-stack">
       <section className="card page-enter">
@@ -4250,7 +4267,7 @@ function AlertsPage({ selectedAssetQuote, alertPrice, failedQuotes, watchlistQuo
             <p className="eyebrow">Bildirim merkezi</p>
             <h2>Alarmlar ve uyarılar</h2>
             <p className="muted">
-              Fiyat alarmları, akış uyarıları ve veri kesintileri burada görünür.
+              Fiyat alarmları, bot işlemleri, akış uyarıları ve veri kesintileri burada görünür.
             </p>
           </div>
         </header>
@@ -4265,14 +4282,47 @@ function AlertsPage({ selectedAssetQuote, alertPrice, failedQuotes, watchlistQuo
             <strong>{alertPrice || '—'}</strong>
           </div>
           <div className="alert-stat">
+            <span>Bot işlemi</span>
+            <strong>{botTrades.length}</strong>
+          </div>
+          <div className="alert-stat">
             <span>Veri uyarısı</span>
             <strong>{failedQuotes.length}</strong>
           </div>
-          <div className="alert-stat">
-            <span>Watchlist</span>
-            <strong>{watchlistQuotes.length} varlık</strong>
-          </div>
         </div>
+      </section>
+
+      <section className="card page-enter">
+        <header className="card-head">
+          <div>
+            <p className="eyebrow">Trade bot</p>
+            <h3>Bot alım / satım bildirimleri</h3>
+          </div>
+        </header>
+        {botTrades.length === 0 ? (
+          <div className="empty-block">
+            <Bell size={26} />
+            <strong>Henüz bot işlemi yok</strong>
+            <p>Trade bot bir alım veya satım yaptığında bildirimler burada listelenir.</p>
+          </div>
+        ) : (
+          <ul className="alert-feed">
+            {botTrades.map((event) => (
+              <li key={event.id} className={`alert-row tone-${event.side === 'sell' ? 'warn' : 'ok'}`}>
+                <div>
+                  <strong>
+                    {event.side === 'buy' ? 'AL' : 'SAT'}
+                    {event.symbol ? ` · ${event.symbol}` : ''}
+                  </strong>
+                  <small>{event.detail}</small>
+                </div>
+                <div className="alert-row-side">
+                  <small>{formatTime(event.at)}</small>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section className="card page-enter">
@@ -4641,6 +4691,9 @@ function ProfilePage({
 }: SharedPageProps & { session: SessionUser | null; onSessionUpdate: (s: SessionUser) => void }) {
   const [draft, setDraft] = useState<Profile>(profile)
   const [savedAt, setSavedAt] = useState<string | null>(null)
+  const [saveMessage, setSaveMessage] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [photoUploading, setPhotoUploading] = useState(false)
   const photoInputRef = useRef<HTMLInputElement>(null)
 
   const [oldPwd, setOldPwd] = useState('')
@@ -4689,47 +4742,74 @@ function ProfilePage({
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
-    setProfile(draft)
-    if (session) {
-      await updateUserProfile(session.id, {
-        name: draft.name,
-        email: draft.email,
-        avatar: draft.avatar,
-        photoData: draft.photoData,
-        bio: draft.bio,
-        preferred_currency: draft.preferredCurrency,
-      })
-      onSessionUpdate({
-        ...session,
-        name: draft.name,
-        email: draft.email,
-        avatar: draft.avatar,
-        photoData: draft.photoData,
-      })
+    setSaving(true)
+    setSaveMessage(null)
+    try {
+      if (session) {
+        await updateUserProfile(session.id, {
+          name: draft.name,
+          email: draft.email,
+          avatar: draft.avatar,
+          photoData: draft.photoData,
+          bio: draft.bio,
+          preferred_currency: draft.preferredCurrency,
+        })
+        onSessionUpdate({
+          ...session,
+          name: draft.name,
+          email: draft.email,
+          avatar: draft.avatar,
+          photoData: draft.photoData,
+        })
+      }
+      setProfile(draft)
+      setSavedAt(new Date().toISOString())
+      setSaveMessage({ tone: 'ok', text: 'Profil bilgilerin kaydedildi.' })
+      addLog('info', 'Profil', 'Profil güncellendi', null, session?.id)
+    } catch (error) {
+      const text = error instanceof Error ? error.message : 'Bilinmeyen hata'
+      setSaveMessage({ tone: 'err', text: `Kaydedilemedi: ${text}` })
+      addLog('error', 'Profil', `Profil güncellenemedi: ${text}`, null, session?.id)
+    } finally {
+      setSaving(false)
     }
-    setSavedAt(new Date().toISOString())
-    addLog('info', 'Profil', 'Profil güncellendi', null, session?.id)
   }
 
   async function handlePhotoUpload(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     if (!file) return
+    setSaveMessage(null)
     if (!session) {
       // Oturum yoksa local preview göster
       const reader = new FileReader()
       reader.onload = (e) => {
         const photoData = e.target?.result as string
         setDraft((d) => ({ ...d, photoData }))
+        setSaveMessage({ tone: 'ok', text: 'Profil fotoğrafı güncellendi (önizleme).' })
       }
       reader.readAsDataURL(file)
       return
     }
     // Supabase Storage'a yükle, URL'i profile.photoData (photo_url) olarak sakla
-    const publicUrl = await uploadProfilePhoto(session.id, file)
-    if (publicUrl) {
+    setPhotoUploading(true)
+    try {
+      const publicUrl = await uploadProfilePhoto(session.id, file)
+      if (!publicUrl) {
+        throw new Error('Fotoğraf yüklenemedi.')
+      }
       setDraft((d) => ({ ...d, photoData: publicUrl }))
       await updateUserProfile(session.id, { photoData: publicUrl })
+      setProfile({ ...draft, photoData: publicUrl })
       onSessionUpdate({ ...session, photoData: publicUrl })
+      setSaveMessage({ tone: 'ok', text: 'Profil fotoğrafı kaydedildi.' })
+      addLog('info', 'Profil', 'Profil fotoğrafı güncellendi', null, session.id)
+    } catch (error) {
+      const text = error instanceof Error ? error.message : 'Bilinmeyen hata'
+      setSaveMessage({ tone: 'err', text: `Fotoğraf kaydedilemedi: ${text}` })
+      addLog('error', 'Profil', `Fotoğraf güncellenemedi: ${text}`, null, session.id)
+    } finally {
+      setPhotoUploading(false)
+      event.target.value = ''
     }
   }
 
@@ -4750,6 +4830,7 @@ function ProfilePage({
                 className="profile-photo-upload-btn"
                 onClick={() => photoInputRef.current?.click()}
                 title="Fotoğraf yükle"
+                disabled={photoUploading}
               >
                 <Upload size={14} />
               </button>
@@ -4863,8 +4944,8 @@ function ProfilePage({
           </label>
 
           <div className="form-actions">
-            <button type="submit" className="primary-button">
-              Profili kaydet
+            <button type="submit" className="primary-button" disabled={saving}>
+              {saving ? 'Kaydediliyor…' : 'Profili kaydet'}
             </button>
             <button
               type="button"
@@ -4873,6 +4954,11 @@ function ProfilePage({
             >
               Varsayılana dön
             </button>
+            {saveMessage && (
+              <span className={`chip ${saveMessage.tone === 'ok' ? 'ok' : 'err'}`}>
+                {saveMessage.text}
+              </span>
+            )}
           </div>
         </form>
       </section>
