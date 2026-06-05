@@ -49,7 +49,8 @@ import {
   MessageSquare,
   type LucideIcon,
 } from 'lucide-react'
-import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { createPortal } from 'react-dom'
+import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { gsap } from 'gsap'
 import './App.css'
 import { AnimatedNumber } from './components/AnimatedNumber'
@@ -360,7 +361,6 @@ type BotCashTransferRequest = {
 }
 
 function App() {
-  const location = useLocation()
   const navigate = useNavigate()
   const shellRef = useRef<HTMLDivElement | null>(null)
   const pageRef = useRef<HTMLDivElement | null>(null)
@@ -382,6 +382,8 @@ function App() {
     return globalThis.localStorage?.getItem(COLLAPSED_STORAGE_KEY) === '1'
   })
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
+  const [showSplash, setShowSplash] = useState(true)
 
   const [profile, setProfile] = useState<Profile>(defaultProfile)
   const [watchlist, setWatchlist] = useState<string[]>([])
@@ -622,19 +624,6 @@ function App() {
     return () => ctx.revert()
   }, [])
 
-  useLayoutEffect(() => {
-    if (!pageRef.current) {
-      return
-    }
-    const ctx = gsap.context(() => {
-      gsap.fromTo(
-        '.page-enter',
-        { opacity: 0, y: 22, filter: 'blur(8px)' },
-        { opacity: 1, y: 0, filter: 'blur(0px)', duration: 0.5, stagger: 0.06, ease: 'power3.out' },
-      )
-    }, pageRef)
-    return () => ctx.revert()
-  }, [location.pathname, selectedMarket, selectedInstrumentId, quotes, overviewQuotes, assetSnapshot])
 
   useEffect(() => {
     let cancelled = false
@@ -1804,28 +1793,35 @@ function App() {
   const tickerBase = livePriceQuotes.slice(0, 16)
   const tickerLoop = tickerBase.length > 0 ? [...tickerBase, ...tickerBase] : []
 
+  const withSplash = (node: React.ReactNode) => (
+    <>
+      {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
+      {node}
+    </>
+  )
+
   if (!authSession) {
     if (!authReady) {
-      return (
+      return withSplash(
         <div className="login-page">
           <div className="login-bg-anim" />
           <div style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>
             <RefreshCw size={18} className="spin" /> Oturum yükleniyor…
           </div>
-        </div>
+        </div>,
       )
     }
-    return (
+    return withSplash(
       <LoginPage
         onLogin={(session) => {
           setAuthSession(session)
           addLog('info', 'Auth', `Giriş yapıldı: ${session.username}`, null, session.id)
         }}
-      />
+      />,
     )
   }
 
-  return (
+  return withSplash(
     <div
       className={`app-shell${sidebarCollapsed ? ' is-collapsed' : ''}${mobileNavOpen ? ' is-mobile-open' : ''}`}
       ref={shellRef}
@@ -2106,6 +2102,53 @@ function App() {
         </div>
       )}
     </div>
+  )
+}
+
+function SplashScreen({ onComplete }: { onComplete: () => void }) {
+  const rootRef = useRef<HTMLDivElement>(null)
+  const titleRef = useRef<HTMLHeadingElement>(null)
+  const barRef = useRef<HTMLDivElement>(null)
+  // onComplete her render'da yeni referans olabilir; animasyonun yeniden
+  // başlamaması için ref'te tutuyoruz ve efekti yalnızca bir kez çalıştırıyoruz.
+  const onCompleteRef = useRef(onComplete)
+  onCompleteRef.current = onComplete
+
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    const title = titleRef.current
+    const bar = barRef.current
+    if (!root || !title || !bar) return
+    const tl = gsap.timeline()
+    tl.fromTo(
+      title,
+      { opacity: 0, y: 20, filter: 'blur(12px)' },
+      { opacity: 1, y: 0, filter: 'blur(0px)', duration: 0.9, ease: 'power3.out' },
+    )
+    tl.fromTo(
+      bar,
+      { width: '0%' },
+      { width: '100%', duration: 1.35, ease: 'power2.inOut' },
+      '-=0.35',
+    )
+    tl.to(root, { opacity: 0, duration: 0.55, ease: 'power2.inOut', onComplete: () => onCompleteRef.current() }, '+=0.2')
+    return () => {
+      tl.kill()
+    }
+  }, [])
+
+  return createPortal(
+    <div className="splash-screen" ref={rootRef}>
+      <div className="splash-inner">
+        <h1 className="splash-title" ref={titleRef}>
+          Finansal Teknolojiler
+        </h1>
+        <div className="splash-bar">
+          <div className="splash-bar-fill" ref={barRef} />
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 
