@@ -162,6 +162,13 @@ type Profile = {
   photoData?: string
 }
 
+type SupportedCurrency = Profile['preferredCurrency']
+
+type FxRates = {
+  usdTry: number | null
+  eurTry: number | null
+}
+
 type UserPosition = {
   instrumentId: string
   quantity: number
@@ -251,6 +258,61 @@ const defaultProfile: Profile = {
 function getAvatarIcon(avatar: string | undefined): string {
   const normalized = (avatar || '').trim().toUpperCase()
   return avatarOptionMap.get(normalized) ?? (normalized.slice(0, 2) || 'YA')
+}
+
+function normalizeCurrencyCode(value: string | null | undefined): SupportedCurrency | null {
+  const normalized = (value ?? '').trim().toUpperCase()
+  if (!normalized) return null
+  if (normalized.includes('TRY') || normalized.includes('TL') || normalized.includes('LIRA')) return 'TRY'
+  if (normalized.includes('USD') || normalized.includes('DOLLAR')) return 'USD'
+  if (normalized.includes('EUR') || normalized.includes('EURO')) return 'EUR'
+  return null
+}
+
+function inferInstrumentCurrency(instrument: InstrumentConfig): SupportedCurrency {
+  const symbol = instrument.providerSymbol.toUpperCase()
+  if (symbol.endsWith('/TRY')) return 'TRY'
+  if (symbol.endsWith('/EUR')) return 'EUR'
+  return 'USD'
+}
+
+function resolveInstrumentCurrency(
+  instrument: InstrumentConfig,
+  quote: QuoteData | null | undefined,
+): SupportedCurrency {
+  return normalizeCurrencyCode(quote?.currency) ?? inferInstrumentCurrency(instrument)
+}
+
+function convertCurrencyValue(
+  value: number,
+  sourceCurrency: SupportedCurrency,
+  targetCurrency: SupportedCurrency,
+  fxRates: FxRates,
+) {
+  if (!Number.isFinite(value) || sourceCurrency === targetCurrency) {
+    return value
+  }
+
+  const toTry = (() => {
+    if (sourceCurrency === 'TRY') return value
+    if (sourceCurrency === 'USD' && Number.isFinite(fxRates.usdTry) && (fxRates.usdTry ?? 0) > 0) {
+      return value * Number(fxRates.usdTry)
+    }
+    if (sourceCurrency === 'EUR' && Number.isFinite(fxRates.eurTry) && (fxRates.eurTry ?? 0) > 0) {
+      return value * Number(fxRates.eurTry)
+    }
+    return null
+  })()
+
+  if (toTry === null) return value
+  if (targetCurrency === 'TRY') return toTry
+  if (targetCurrency === 'USD' && Number.isFinite(fxRates.usdTry) && (fxRates.usdTry ?? 0) > 0) {
+    return toTry / Number(fxRates.usdTry)
+  }
+  if (targetCurrency === 'EUR' && Number.isFinite(fxRates.eurTry) && (fxRates.eurTry ?? 0) > 0) {
+    return toTry / Number(fxRates.eurTry)
+  }
+  return value
 }
 
 function portfolioPositionToBotPosition(
@@ -607,6 +669,14 @@ function App() {
     [liveQuotes],
   )
 
+  const profileFxRates = useMemo<FxRates>(
+    () => ({
+      usdTry: quoteMap.get('usdtry')?.price ?? null,
+      eurTry: quoteMap.get('eurtry')?.price ?? null,
+    }),
+    [quoteMap],
+  )
+
   const overviewQuoteMap = useMemo(
     () => new Map(overviewQuotes.map((item) => [item.instrument.market, item])),
     [overviewQuotes],
@@ -687,35 +757,46 @@ function App() {
           return null
         }
         const quote = quoteMap.get(position.instrumentId)
+        const valuationCurrency = resolveInstrumentCurrency(instrument, quote)
         const price = quote?.price ?? position.averageCost
         const marketValue = price * position.quantity
         const cost = position.averageCost * position.quantity
-        const pnl = marketValue - cost
-        const pnlPct = cost === 0 ? 0 : (pnl / cost) * 100
+        const marketValueTry = convertCurrencyValue(
+          marketValue,
+          valuationCurrency,
+          'TRY',
+          profileFxRates,
+        )
+        const costTry = convertCurrencyValue(cost, valuationCurrency, 'TRY', profileFxRates)
+        const pnlTry = marketValueTry - costTry
+        const pnlPct = cost === 0 ? 0 : ((marketValue - cost) / cost) * 100
         return {
           id: position.instrumentId,
           quantity: position.quantity,
           averageCost: position.averageCost,
           instrument,
           quote: quote ?? null,
+          valuationCurrency,
           price,
           marketValue,
+          marketValueTry,
           cost,
-          pnl,
+          costTry,
+          pnlTry,
           pnlPct,
           color: positionPalette[index % positionPalette.length],
         }
       })
       .filter((item): item is NonNullable<typeof item> => Boolean(item))
-  }, [userPortfolio, quoteMap])
+  }, [profileFxRates, userPortfolio, quoteMap])
 
   const portfolioMarketValue = useMemo(
-    () => portfolioPositions.reduce((sum, position) => sum + position.marketValue, 0),
+    () => portfolioPositions.reduce((sum, position) => sum + position.marketValueTry, 0),
     [portfolioPositions],
   )
 
   const portfolioCost = useMemo(
-    () => portfolioPositions.reduce((sum, position) => sum + position.cost, 0),
+    () => portfolioPositions.reduce((sum, position) => sum + position.costTry, 0),
     [portfolioPositions],
   )
 
@@ -1678,6 +1759,7 @@ function App() {
     toggleWatchlist,
     isInWatchlist,
     profile,
+    profileFxRates,
     setProfile,
     watchlistInstruments,
     allInstruments: instruments,
@@ -2039,6 +2121,7 @@ type SharedPageProps = {
   toggleWatchlist: (instrumentId: string) => void
   isInWatchlist: (instrumentId: string) => boolean
   profile: Profile
+  profileFxRates: FxRates
   setProfile: (profile: Profile) => void
   watchlistInstruments: InstrumentConfig[]
   allInstruments: InstrumentConfig[]
@@ -2070,10 +2153,13 @@ type PortfolioPosition = {
   averageCost: number
   instrument: InstrumentConfig
   quote: QuoteData | null
+  valuationCurrency: SupportedCurrency
   price: number
   marketValue: number
+  marketValueTry: number
   cost: number
-  pnl: number
+  costTry: number
+  pnlTry: number
   pnlPct: number
   color: string
 }
@@ -2092,6 +2178,7 @@ function DashboardPage({
   savedNotes,
   priceAlerts,
   profile,
+  profileFxRates,
   onOpenAsset,
   onSelectMarket,
   toggleWatchlist,
@@ -2148,7 +2235,10 @@ function DashboardPage({
         <StatCard
           tone="blue"
           label="Portföy değeri"
-          value={`${formatCurrencyValue(portfolioMarketValue, profile.preferredCurrency)}`}
+          value={`${formatCurrencyValue(portfolioMarketValue, profile.preferredCurrency, {
+            sourceCurrency: 'TRY',
+            fxRates: profileFxRates,
+          })}`}
           delta={`${formatPercent(portfolioUnrealizedPct)} dönüş`}
           deltaPositive={portfolioUnrealized >= 0}
           icon={Wallet}
@@ -2156,7 +2246,10 @@ function DashboardPage({
         <StatCard
           tone="green"
           label="Anlık P/L"
-          value={`${formatSignedCurrency(portfolioUnrealized, profile.preferredCurrency)}`}
+          value={`${formatSignedCurrency(portfolioUnrealized, profile.preferredCurrency, {
+            sourceCurrency: 'TRY',
+            fxRates: profileFxRates,
+          })}`}
           delta={`${portfolioPositions.length} pozisyon`}
           deltaPositive={portfolioUnrealized >= 0}
           icon={portfolioUnrealized >= 0 ? TrendingUp : TrendingDown}
@@ -2228,17 +2321,23 @@ function DashboardPage({
               <p className="eyebrow">Portföy</p>
               <h3>Dağılım</h3>
             </div>
-            <span className="muted">{formatCurrencyValue(portfolioMarketValue, profile.preferredCurrency)}</span>
+            <span className="muted">{formatCurrencyValue(portfolioMarketValue, profile.preferredCurrency, {
+              sourceCurrency: 'TRY',
+              fxRates: profileFxRates,
+            })}</span>
           </header>
           <div className="portfolio-summary">
             <DonutChart
               size={220}
               thickness={28}
               centerLabel="Toplam"
-              centerValue={formatCompactNumber(portfolioMarketValue)}
+              centerValue={formatCompactCurrencyValue(portfolioMarketValue, profile.preferredCurrency, {
+                sourceCurrency: 'TRY',
+                fxRates: profileFxRates,
+              })}
               slices={portfolioPositions.map((position) => ({
                 label: position.instrument.symbol,
-                value: position.marketValue,
+                value: position.marketValueTry,
                 color: position.color,
               }))}
             />
@@ -2248,7 +2347,10 @@ function DashboardPage({
                   <span className="legend-dot" style={{ background: position.color }} />
                   <span className="legend-name">{position.instrument.symbol}</span>
                   <span className="legend-val">
-                    {formatCurrencyValue(position.marketValue, profile.preferredCurrency)}
+                    {formatCurrencyValue(position.marketValueTry, profile.preferredCurrency, {
+                      sourceCurrency: 'TRY',
+                      fxRates: profileFxRates,
+                    })}
                   </span>
                   <span className={getChangeClass(position.pnlPct)}>
                     {formatPercent(position.pnlPct)}
@@ -2594,6 +2696,7 @@ function AssetPage({
   addPriceAlert,
   removePriceAlert,
   profile,
+  profileFxRates,
 }: SharedPageProps) {
   const liveQuote =
     selectedAssetQuote && selectedAssetQuote.price !== null && selectedAssetQuote.price !== undefined
@@ -2977,7 +3080,10 @@ function AssetPage({
           </div>
           <span className="muted">
             {portfolioPositions.length} pozisyon ·{' '}
-            {formatCurrencyValue(portfolioMarketValue, profile.preferredCurrency)}
+            {formatCurrencyValue(portfolioMarketValue, profile.preferredCurrency, {
+              sourceCurrency: 'TRY',
+              fxRates: profileFxRates,
+            })}
           </span>
         </header>
 
@@ -2990,17 +3096,27 @@ function AssetPage({
                 centerLabel={existingPosition ? 'Seçili' : 'Toplam'}
                 centerValue={
                   existingPosition
-                    ? formatCompactNumber(existingPosition.marketValue)
-                    : formatCompactNumber(portfolioMarketValue)
+                    ? formatCompactCurrencyValue(existingPosition.marketValueTry, profile.preferredCurrency, {
+                      sourceCurrency: 'TRY',
+                      fxRates: profileFxRates,
+                    })
+                    : formatCompactCurrencyValue(portfolioMarketValue, profile.preferredCurrency, {
+                      sourceCurrency: 'TRY',
+                      fxRates: profileFxRates,
+                    })
                 }
                 selectedId={existingPosition ? existingPosition.instrument.id : null}
                 slices={portfolioPositions.map((position) => ({
                   id: position.instrument.id,
                   label: `${position.instrument.symbol} · ${formatCurrencyValue(
-                    position.marketValue,
+                    position.marketValueTry,
                     profile.preferredCurrency,
+                    {
+                      sourceCurrency: 'TRY',
+                      fxRates: profileFxRates,
+                    },
                   )}`,
-                  value: position.marketValue,
+                  value: position.marketValueTry,
                   color: position.color,
                 }))}
                 onSelect={(slice) => {
@@ -3029,8 +3145,11 @@ function AssetPage({
                   : `${selectedInstrument.symbol} ekle`}
               </strong>
               {existingPosition && (
-                <span className={existingPosition.pnl >= 0 ? 'chip ok' : 'chip warn'}>
-                  P/L {formatSignedNumber(existingPosition.pnl)} (
+                <span className={existingPosition.pnlTry >= 0 ? 'chip ok' : 'chip warn'}>
+                  P/L {formatSignedCurrency(existingPosition.pnlTry, profile.preferredCurrency, {
+                    sourceCurrency: 'TRY',
+                    fxRates: profileFxRates,
+                  })} (
                   {formatPercent(existingPosition.pnlPct)})
                 </span>
               )}
@@ -3096,7 +3215,10 @@ function AssetPage({
                     <span className="legend-dot" style={{ background: position.color }} />
                     <span className="legend-name">{position.instrument.symbol}</span>
                     <span className="legend-val">
-                      {formatCurrencyValue(position.marketValue, profile.preferredCurrency)}
+                      {formatCurrencyValue(position.marketValueTry, profile.preferredCurrency, {
+                        sourceCurrency: 'TRY',
+                        fxRates: profileFxRates,
+                      })}
                     </span>
                     <span className={getChangeClass(position.pnlPct)}>
                       {formatPercent(position.pnlPct)}
@@ -3125,6 +3247,7 @@ function PortfolioPage({
   withdrawnCashTotal,
   pendingLimitOrders,
   profile,
+  profileFxRates,
   onOpenAsset,
   upsertUserPosition,
   removeUserPosition,
@@ -3224,9 +3347,9 @@ function PortfolioPage({
       ),
     [chartMarketFilter, portfolioPositions],
   )
-  const chartTotalValue = chartPositions.reduce((sum, position) => sum + position.marketValue, 0)
+  const chartTotalValue = chartPositions.reduce((sum, position) => sum + position.marketValueTry, 0)
   const maxAbsolutePnl = Math.max(
-    ...chartPositions.map((position) => Math.abs(position.pnl)),
+    ...chartPositions.map((position) => Math.abs(position.pnlTry)),
     0.0001,
   )
 
@@ -3236,9 +3359,9 @@ function PortfolioPage({
         tableMarketFilter === 'all' || position.instrument.market === tableMarketFilter,
     )
     return filtered.sort((a, b) => {
-      if (tableSort === 'pnl_desc') return b.pnl - a.pnl
-      if (tableSort === 'pnl_asc') return a.pnl - b.pnl
-      return b.marketValue - a.marketValue
+      if (tableSort === 'pnl_desc') return b.pnlTry - a.pnlTry
+      if (tableSort === 'pnl_asc') return a.pnlTry - b.pnlTry
+      return b.marketValueTry - a.marketValueTry
     })
   }, [portfolioPositions, tableMarketFilter, tableSort])
 
@@ -3301,12 +3424,12 @@ function PortfolioPage({
   function metricValue(position: PortfolioPosition): number {
     if (chartMetric === 'weight') {
       if (chartTotalValue === 0) return 0
-      return (position.marketValue / chartTotalValue) * 100
+      return (position.marketValueTry / chartTotalValue) * 100
     }
     if (chartMetric === 'pnl') {
-      return position.pnl
+      return position.pnlTry
     }
-    return position.marketValue
+    return position.marketValueTry
   }
 
   function metricWidth(position: PortfolioPosition): number {
@@ -3314,10 +3437,10 @@ function PortfolioPage({
       return Math.max(4, metricValue(position))
     }
     if (chartMetric === 'pnl') {
-      return Math.max(4, (Math.abs(position.pnl) / maxAbsolutePnl) * 100)
+      return Math.max(4, (Math.abs(position.pnlTry) / maxAbsolutePnl) * 100)
     }
-    const maxValue = Math.max(...chartPositions.map((item) => item.marketValue), 0.0001)
-    return Math.max(4, (position.marketValue / maxValue) * 100)
+    const maxValue = Math.max(...chartPositions.map((item) => item.marketValueTry), 0.0001)
+    return Math.max(4, (position.marketValueTry / maxValue) * 100)
   }
 
   function metricLabel(position: PortfolioPosition): string {
@@ -3325,9 +3448,15 @@ function PortfolioPage({
       return `${metricValue(position).toFixed(2)}%`
     }
     if (chartMetric === 'pnl') {
-      return `${formatSignedCurrency(position.pnl, profile.preferredCurrency)} · ${formatPercent(position.pnlPct)}`
+      return `${formatSignedCurrency(position.pnlTry, profile.preferredCurrency, {
+        sourceCurrency: 'TRY',
+        fxRates: profileFxRates,
+      })} · ${formatPercent(position.pnlPct)}`
     }
-    return formatCurrencyValue(position.marketValue, profile.preferredCurrency)
+    return formatCurrencyValue(position.marketValueTry, profile.preferredCurrency, {
+      sourceCurrency: 'TRY',
+      fxRates: profileFxRates,
+    })
   }
 
   function resetWizard() {
@@ -3403,12 +3532,18 @@ function PortfolioPage({
             </div>
             <div>
               <span>Piyasa değeri</span>
-              <strong>{formatCurrencyValue(portfolioMarketValue, profile.preferredCurrency)}</strong>
+              <strong>{formatCurrencyValue(portfolioMarketValue, profile.preferredCurrency, {
+                sourceCurrency: 'TRY',
+                fxRates: profileFxRates,
+              })}</strong>
             </div>
             <div>
               <span>Anlık P/L</span>
               <strong className={portfolioUnrealized >= 0 ? 'positive' : 'negative'}>
-                {formatSignedCurrency(portfolioUnrealized, profile.preferredCurrency)}
+                {formatSignedCurrency(portfolioUnrealized, profile.preferredCurrency, {
+                  sourceCurrency: 'TRY',
+                  fxRates: profileFxRates,
+                })}
               </strong>
             </div>
             <div>
@@ -3428,11 +3563,14 @@ function PortfolioPage({
             size={220}
             thickness={26}
             centerLabel="Toplam"
-            centerValue={formatCompactNumber(portfolioMarketValue)}
+            centerValue={formatCompactCurrencyValue(portfolioMarketValue, profile.preferredCurrency, {
+              sourceCurrency: 'TRY',
+              fxRates: profileFxRates,
+            })}
             slices={chartPositions.map((position) => ({
               id: position.instrument.id,
               label: position.instrument.symbol,
-              value: position.marketValue,
+              value: position.marketValueTry,
               color: position.color,
             }))}
             onSelect={(slice) => {
@@ -3655,7 +3793,16 @@ function PortfolioPage({
                 </div>
                 <div>
                   <span>Toplam tutar</span>
-                  <strong>{formatCurrencyValue(totalAmount, profile.preferredCurrency)}</strong>
+                  <strong>{formatCurrencyValue(
+                    totalAmount,
+                    profile.preferredCurrency,
+                    purchaseInstrument
+                      ? {
+                        sourceCurrency: resolveInstrumentCurrency(purchaseInstrument, purchaseQuote),
+                        fxRates: profileFxRates,
+                      }
+                      : undefined,
+                  )}</strong>
                 </div>
                 <div>
                   <span>Portföye yansıyacak maliyet</span>
@@ -3866,12 +4013,19 @@ function PortfolioPage({
                 centerValue={
                   chartMetric === 'weight'
                     ? '%100'
-                    : formatCompactNumber(chartPositions.reduce((sum, position) => sum + position.marketValue, 0))
+                    : formatCompactCurrencyValue(
+                      chartPositions.reduce((sum, position) => sum + position.marketValueTry, 0),
+                      profile.preferredCurrency,
+                      {
+                        sourceCurrency: 'TRY',
+                        fxRates: profileFxRates,
+                      },
+                    )
                 }
                 slices={chartPositions.map((position) => ({
                   id: position.instrument.id,
                   label: position.instrument.symbol,
-                  value: chartMetric === 'pnl' ? Math.abs(position.pnl) : position.marketValue,
+                  value: chartMetric === 'pnl' ? Math.abs(position.pnlTry) : position.marketValueTry,
                   color: position.color,
                 }))}
                 onSelect={(slice) => {
@@ -3897,7 +4051,7 @@ function PortfolioPage({
                   </span>
                   <span className="portfolio-chart-track">
                     <span
-                      className={chartMetric === 'pnl' && position.pnl < 0 ? 'bar-fill negative' : 'bar-fill'}
+                      className={chartMetric === 'pnl' && position.pnlTry < 0 ? 'bar-fill negative' : 'bar-fill'}
                       style={{ width: `${metricWidth(position)}%`, background: position.color }}
                     />
                   </span>
@@ -3979,7 +4133,16 @@ function PortfolioPage({
                 placeholder="0.15"
               />
               <small className="muted small">
-                Tahmini net satış: {formatCurrencyValue(netSellAmount, profile.preferredCurrency)}
+                Tahmini net satış: {formatCurrencyValue(
+                  netSellAmount,
+                  profile.preferredCurrency,
+                  sellPosition
+                    ? {
+                      sourceCurrency: sellPosition.valuationCurrency,
+                      fxRates: profileFxRates,
+                    }
+                    : undefined,
+                )}
               </small>
             </div>
             <div className="form-actions">
@@ -4027,9 +4190,15 @@ function PortfolioPage({
                   <span>{position.quantity}</span>
                   <span>{formatNumber(position.averageCost)}</span>
                   <span>{formatNumber(position.price)}</span>
-                  <span>{formatCurrencyValue(position.marketValue, profile.preferredCurrency)}</span>
-                  <span className={position.pnl >= 0 ? 'positive' : 'negative'}>
-                    {formatSignedNumber(position.pnl)} ({formatPercent(position.pnlPct)})
+                  <span>{formatCurrencyValue(position.marketValueTry, profile.preferredCurrency, {
+                    sourceCurrency: 'TRY',
+                    fxRates: profileFxRates,
+                  })}</span>
+                  <span className={position.pnlTry >= 0 ? 'positive' : 'negative'}>
+                    {formatSignedCurrency(position.pnlTry, profile.preferredCurrency, {
+                      sourceCurrency: 'TRY',
+                      fxRates: profileFxRates,
+                    })} ({formatPercent(position.pnlPct)})
                   </span>
                 </button>
                 <div className="position-row-actions">
@@ -5282,10 +5451,10 @@ function BotPage({
         <div className="bot-warning page-enter">
           <AlertTriangle size={18} />
           <div>
-            <strong>OpenAI anahtarı tanımlı değil</strong>
+            <strong>Karar motoru anahtarı tanımlı değil</strong>
             <p>
               <code>.env</code> dosyasına <code>VITE_OPENAI_API_KEY=sk-...</code> ekleyip dev
-              sunucusunu yeniden başlat. Anahtar olmadan AI karar motoru işlem açmaz.
+              sunucusunu yeniden başlat. Anahtar olmadan karar motoru işlem açmaz.
             </p>
           </div>
         </div>
@@ -6009,6 +6178,24 @@ function formatCompactNumber(value: number | null | undefined) {
   }).format(value)
 }
 
+function formatCompactCurrencyValue(
+  value: number | null | undefined,
+  currency: SupportedCurrency,
+  options?: {
+    sourceCurrency?: SupportedCurrency
+    fxRates?: FxRates
+  },
+) {
+  if (value === null || value === undefined) {
+    return '--'
+  }
+  const converted =
+    options?.sourceCurrency && options.fxRates
+      ? convertCurrencyValue(value, options.sourceCurrency, currency, options.fxRates)
+      : value
+  return `${currencySymbol(currency)}${formatCompactNumber(converted)}`
+}
+
 function formatPercent(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return '--'
@@ -6024,19 +6211,41 @@ function formatTime(value: string) {
   })
 }
 
-function currencySymbol(currency: Profile['preferredCurrency']) {
+function currencySymbol(currency: SupportedCurrency) {
   if (currency === 'USD') return '$'
   if (currency === 'EUR') return '€'
-  return '?'
+  return '₺'
 }
 
-function formatCurrencyValue(value: number, currency: Profile['preferredCurrency']) {
-  return `${currencySymbol(currency)}${value.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}`
+function formatCurrencyValue(
+  value: number,
+  currency: SupportedCurrency,
+  options?: {
+    sourceCurrency?: SupportedCurrency
+    fxRates?: FxRates
+  },
+) {
+  const converted =
+    options?.sourceCurrency && options.fxRates
+      ? convertCurrencyValue(value, options.sourceCurrency, currency, options.fxRates)
+      : value
+  return `${currencySymbol(currency)}${converted.toLocaleString('tr-TR', { maximumFractionDigits: 0 })}`
 }
 
-function formatSignedCurrency(value: number, currency: Profile['preferredCurrency']) {
-  const sign = value >= 0 ? '+' : '-'
-  const abs = Math.abs(value).toLocaleString('tr-TR', { maximumFractionDigits: 0 })
+function formatSignedCurrency(
+  value: number,
+  currency: SupportedCurrency,
+  options?: {
+    sourceCurrency?: SupportedCurrency
+    fxRates?: FxRates
+  },
+) {
+  const converted =
+    options?.sourceCurrency && options.fxRates
+      ? convertCurrencyValue(value, options.sourceCurrency, currency, options.fxRates)
+      : value
+  const sign = converted >= 0 ? '+' : '-'
+  const abs = Math.abs(converted).toLocaleString('tr-TR', { maximumFractionDigits: 0 })
   return `${sign}${currencySymbol(currency)}${abs}`
 }
 
@@ -6372,15 +6581,15 @@ function SupportPage({ session }: { session: SessionUser | null }) {
   const faqs = [
     {
       q: 'Trade botu nasıl çalışır?',
-      a: 'Trade bot, AI (OpenAI GPT-4o) kullanarak teknik indikatörleri analiz eder ve otomatik al/sat kararları üretir. RSI, MACD, Bollinger bantları gibi göstergeleri değerlendirir. Tüm işlemler simüle edilmiş olup gerçek para kullanılmaz.',
+      a: 'Trade bot, teknik indikatörleri analiz ederek otomatik al/sat kararları üretir. RSI, MACD, Bollinger bantları gibi göstergeleri değerlendirir. Tüm işlemler simüle edilmiş olup gerçek para kullanılmaz.',
     },
     {
       q: 'Varlıklarımı kaybeder miyim?',
       a: 'Hayır. Platform tamamen simülasyon üzerine çalışır. Gerçek para transferi yapılmaz. Trade bot\'un kullandığı "nakit" sanal bir değerdir.',
     },
     {
-      q: 'OpenAI anahtarı nereye girer?',
-      a: '.env dosyasına VITE_OPENAI_API_KEY=sk-... şeklinde ekleyin. Anahtar olmadan bot teknik mod yerine simüle edilmiş kararlar üretir.',
+      q: 'Karar motoru anahtarı nereye girer?',
+      a: '.env dosyasına VITE_OPENAI_API_KEY=sk-... şeklinde ekleyin. Anahtar olmadan bot işlem açmaz ve yalnızca simülasyon verisiyle görünür.',
     },
     {
       q: 'Piyasa verileri gerçek mi?',

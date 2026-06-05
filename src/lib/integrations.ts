@@ -18,5 +18,5 @@ export const integrationConfig = {
   openAiKey,
   openAiModel,
   openAiAvailable,
-  openAiStatusLabel: openAiAvailable ? 'OpenAI bağlı' : 'OpenAI anahtarı yok',
+  openAiStatusLabel: openAiAvailable ? 'Karar motoru bağlı' : 'Karar motoru anahtarı yok',
 }

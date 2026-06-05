@@ -372,7 +372,7 @@ ZORUNLU FORMAT - Sadece JSON döndür, başka hiçbir şey yok:
 
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as { error?: { message?: string } }
-    throw new Error(err?.error?.message ?? `OpenAI hatası: ${res.status}`)
+    throw new Error(err?.error?.message ?? `Karar motoru hatası: ${res.status}`)
   }
 
   const data = (await res.json()) as {
@@ -910,7 +910,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
     if (!topic.trim()) return
     if (!apiKey) {
       setGenError(
-        'OpenAI API anahtarı eksik. .env dosyasına VITE_OPENAI_API_KEY ekleyin veya aşağıya girin.',
+        'Karar motoru API anahtarı eksik. .env dosyasına VITE_OPENAI_API_KEY ekleyin veya aşağıya girin.',
       )
       setGenState('error')
       return
@@ -1055,7 +1055,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
           <p className="admin-eyebrow">İçerik Üretici</p>
           <h2>Blog & Eğitim İçerikleri</h2>
           <p className="admin-muted">
-            OpenAI ile otomatik makale üret, fotoğraf ekle, düzenle ve yayınla.
+            Otomatik içerik üret, fotoğraf ekle, düzenle ve yayınla.
           </p>
         </div>
         <div className="admin-header-meta">
@@ -1075,8 +1075,8 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
       <div className="admin-card admin-generator-card">
         <div className="admin-card-head">
           <Zap size={18} />
-          <h3>AI İçerik Üretici</h3>
-          {!apiKey && <span className="admin-badge red">OpenAI anahtarı yok</span>}
+          <h3>Akıllı İçerik Üretici</h3>
+          {!apiKey && <span className="admin-badge red">Karar motoru anahtarı yok</span>}
         </div>
 
         <div className="admin-generator-inputs">
@@ -1157,7 +1157,7 @@ function ContentGeneratorPage({ session }: { session: SessionUser }) {
 
           {!import.meta.env.VITE_OPENAI_API_KEY && (
             <label className="admin-field">
-              <span>OpenAI API Anahtarı (geçici)</span>
+              <span>Karar Motoru API Anahtarı (geçici)</span>
               <input
                 type="password"
                 value={apiKey}

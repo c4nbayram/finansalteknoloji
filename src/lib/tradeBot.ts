@@ -573,7 +573,7 @@ export async function evaluateWithAi(
       decision: 'hold',
       confidence: 0,
       source: 'ai',
-      reasoning: 'OpenAI API anahtarı tanımlı değil; AI karar motoru işlem açmadı.',
+      reasoning: 'Karar motoru API anahtarı tanımlı değil; sistem işlem açmadı.',
     }
   }
 
@@ -618,7 +618,7 @@ export async function evaluateWithAi(
   ].join('\n')
 
   const systemPrompt = [
-    'Sen disiplinli, risk kontrollü bir OpenAI trade karar motorusun.',
+    'Sen disiplinli, risk kontrollü bir trade karar motorusun.',
     'Görevin buy/sell/hold kararını yalnızca verilen piyasa verisi, teknik skorlar ve açık pozisyon bilgisiyle üretmek.',
     'Belirsizlikte, çelişkili sinyalde, düşük hacimde veya aşırı volatilitede hold seç.',
     'Pozisyon yoksa sell seçme. Açık pozisyon varsa stop-loss, kâr koruma ve trend bozulmasını önceliklendir.',

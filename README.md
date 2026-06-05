@@ -1,73 +1,49 @@
-# React + TypeScript + Vite
+# Finansal Teknoloji Simülasyon Platformu
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Bu proje, Finansal Teknolojiler dersim için geliştirdiğim bir finansal simülasyon uygulamasıdır.  
+Kullanıcı tarafında portföy ve trade bot işlemleri, yönetici tarafında ise kullanıcı ve işlem takibi yapılabilir.
 
-Currently, two official plugins are available:
+## Kısa Özellikler
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- Kullanıcı girişi ve rol bazlı ekranlar
+- Portföy, pozisyon ve işlem simülasyonu
+- Bot cüzdanı ve bot transfer kayıtları
+- Admin paneli: kullanıcı bazlı hareket, log ve bot işlem izleme
+- Supabase ile gerçek zamanlı veri akışı
 
-## React Compiler
+## Teknolojiler
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- React + TypeScript
+- Vite
+- Supabase
 
-## Expanding the ESLint configuration
+## Gereksinimler
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+- Node.js 18+ (öneri: 20+)
+- npm 9+
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+## Kurulum
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+1. Projeyi aç:
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd finansalteknoloji
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+2. Paketleri yükle:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+```bash
+npm install
+```
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+4. Geliştirme sunucusunu başlat:
+
+```bash
+npm run dev
+```
+
+5. Tarayıcıdan aç:
+
+```text
+http://localhost:5173
 ```

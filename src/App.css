@@ -1218,9 +1218,18 @@
 
 .portfolio-summary {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 14px;
   align-items: center;
+}
+
+.portfolio-summary > * {
+  min-width: 0;
+}
+
+.portfolio-summary .donut-wrapper {
+  justify-self: center;
+  max-width: 100%;
 }
 
 .legend-list {
@@ -1229,13 +1238,17 @@
   padding: 0;
   display: grid;
   gap: 8px;
+  min-width: 0;
 }
 
 .legend-list li {
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "dot name value"
+    ". change value";
   align-items: center;
-  gap: 10px;
+  gap: 4px 10px;
   padding: 8px 10px;
   border-radius: 10px;
   background: var(--surface-bg);
@@ -1244,18 +1257,34 @@
 }
 
 .legend-dot {
+  grid-area: dot;
   width: 10px;
   height: 10px;
   border-radius: 4px;
 }
 
 .legend-name {
+  grid-area: name;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--heading-text);
   font-weight: 700;
 }
 
 .legend-val {
+  grid-area: value;
+  align-self: stretch;
+  display: grid;
+  align-content: center;
+  text-align: right;
+  white-space: nowrap;
   color: var(--text-secondary);
+}
+
+.legend-list li > :last-child {
+  grid-area: change;
+  font-size: 0.78rem;
 }
 
 /* ------------------------ Asset / detail page ------------------------ */
