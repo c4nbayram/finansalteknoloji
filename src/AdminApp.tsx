@@ -2813,6 +2813,7 @@ type AdminBotState = {
 function BotMonitorPage({ session: _session }: { session: SessionUser }) {
   const [users, setUsers] = useState<AuthUser[]>([])
   const [selectedUserId, setSelectedUserId] = useState('')
+  const [search, setSearch] = useState('')
   const [botState, setBotState] = useState<AdminBotState>({})
   const [botTrades, setBotTrades] = useState<DbBotTrade[]>([])
   const [loading, setLoading] = useState(false)
@@ -2823,11 +2824,6 @@ function BotMonitorPage({ session: _session }: { session: SessionUser }) {
       const list = await getUsers()
       if (cancelled) return
       setUsers(list)
-      setSelectedUserId((current) => {
-        if (current && list.some((u) => u.id === current)) return current
-        const preferred = list.find((u) => u.role !== 'admin')
-        return preferred?.id ?? list[0]?.id ?? ''
-      })
     })()
     return () => {
       cancelled = true
@@ -2885,6 +2881,16 @@ function BotMonitorPage({ session: _session }: { session: SessionUser }) {
   }, [selectedUserId, refresh])
 
   const selectedUser = users.find((u) => u.id === selectedUserId) ?? null
+  const filteredUsers = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return users
+    return users.filter(
+      (u) =>
+        u.name.toLowerCase().includes(q) ||
+        u.username.toLowerCase().includes(q) ||
+        (u.email ?? '').toLowerCase().includes(q),
+    )
+  }, [users, search])
   const tradesFromState = botState.trades ?? []
   const trades: Array<{
     id?: string
@@ -2913,42 +2919,87 @@ function BotMonitorPage({ session: _session }: { session: SessionUser }) {
   const pnl = lastPoint && firstPoint ? lastPoint.total - firstPoint.total : 0
   const pnlPct = firstPoint?.total ? (pnl / firstPoint.total) * 100 : 0
 
+  // 1. adım: henüz kullanıcı seçilmediyse seçim listesini göster
+  if (!selectedUser) {
+    return (
+      <div className="admin-page-stack">
+        <div className="admin-page-header">
+          <div>
+            <p className="admin-eyebrow">Bot Monitörü</p>
+            <h2>İzlemek için kullanıcı seç</h2>
+            <p className="admin-muted">Trade bot durumunu görmek istediğin kullanıcıyı seç.</p>
+          </div>
+        </div>
+
+        <div className="admin-card">
+          <div className="admin-card-head" style={{ marginBottom: 12 }}>
+            <Users size={16} />
+            <h3>Kullanıcılar ({users.length})</h3>
+          </div>
+          <label className="admin-field" style={{ marginBottom: 10 }}>
+            <span>Ara</span>
+            <input
+              type="text"
+              placeholder="Ad, kullanıcı adı, e-posta..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </label>
+          <div className="admin-control-user-list">
+            {filteredUsers.map((user) => (
+              <button
+                key={user.id}
+                type="button"
+                className="admin-control-user-btn"
+                onClick={() => setSelectedUserId(user.id)}
+              >
+                <span className="admin-user-ava" style={{ width: 34, height: 34 }}>
+                  {user.photoData ? <img src={user.photoData} alt={user.name} /> : <span>{user.avatar}</span>}
+                </span>
+                <span className="admin-control-user-meta">
+                  <strong>{user.name}</strong>
+                  <small>@{user.username}</small>
+                </span>
+                <span className={user.role === 'admin' ? 'admin-badge blue' : 'admin-badge gray'}>
+                  {user.role === 'admin' ? 'Admin' : 'Kullanıcı'}
+                </span>
+              </button>
+            ))}
+            {filteredUsers.length === 0 && (
+              <div className="admin-empty" style={{ padding: 16 }}>
+                <p>Eşleşen kullanıcı yok.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // 2. adım: seçilen kullanıcının bot detayları
   return (
     <div className="admin-page-stack">
       <div className="admin-page-header">
         <div>
           <p className="admin-eyebrow">Bot Monitörü</p>
-          <h2>Trade Bot Durumu {selectedUser ? `· ${selectedUser.name}` : ''}</h2>
+          <h2>Trade Bot Durumu · {selectedUser.name}</h2>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <select
-            className="admin-select"
-            value={selectedUserId}
-            onChange={(e) => setSelectedUserId(e.target.value)}
+          <button
+            type="button"
+            className="admin-ghost-btn"
+            onClick={() => {
+              setSelectedUserId('')
+              setSearch('')
+            }}
           >
-            {users.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name} (@{u.username})
-              </option>
-            ))}
-          </select>
+            ← Kullanıcı seç
+          </button>
           <button type="button" className="admin-ghost-btn" onClick={() => { void refresh(selectedUserId) }}>
             <RefreshCw size={14} className={loading ? 'admin-spin' : ''} /> Yenile
           </button>
         </div>
       </div>
-
-      {!selectedUser && (
-        <div className="admin-card">
-          <div className="admin-empty">
-            <Users size={26} />
-            <p>İzlenecek kullanıcı bulunamadı.</p>
-          </div>
-        </div>
-      )}
-
-      {selectedUser && (
-        <>
 
       <div className="admin-stats-grid">
         {[
@@ -3025,8 +3076,6 @@ function BotMonitorPage({ session: _session }: { session: SessionUser }) {
           </div>
         )}
       </div>
-      </>
-      )}
     </div>
   )
 }
