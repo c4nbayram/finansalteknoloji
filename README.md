@@ -7,6 +7,17 @@ işlemlerin, logların ve bot durumunun izlendiği ayrı bir admin paneli vardı
 
 Tüm veriler Supabase üzerinde saklanır ve gerçek zamanlı olarak güncellenir.
 
+## Canlı Demo
+
+Proje Vercel üzerinde yayında olduğundan herhangi bir kurulum yapmadan doğrudan
+tarayıcıdan kullanılabilir:
+
+- Uygulama: https://finansalteknoloji.vercel.app
+- Admin paneli: https://finansalteknoloji.vercel.app/admin
+
+Aşağıdaki demo giriş bilgileriyle siteye girip tüm özellikleri deneyebilirsiniz.
+Yerelde çalıştırmak isterseniz "Kurulum ve Çalıştırma" bölümünü takip edebilirsiniz.
+
 ## Demo Giriş Bilgileri
 
 Admin hesabı:
