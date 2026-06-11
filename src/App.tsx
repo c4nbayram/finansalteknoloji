@@ -1896,6 +1896,16 @@ function App() {
               {integrationConfig.marketDataStatusLabel}
             </span>
           </div>
+          <a
+            href={getAdminUrl()}
+            className="sidebar-link"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Admin Panel"
+          >
+            <Settings size={18} />
+            <span>Admin Panel</span>
+          </a>
           <button
             type="button"
             className="sidebar-theme"
@@ -1974,19 +1984,6 @@ function App() {
             >
               <RefreshCw size={16} className={isLoadingQuotes ? 'spin' : ''} />
             </button>
-
-            {authSession?.role === 'admin' && (
-              <a
-                href={getAdminUrl()}
-                className="icon-button"
-                title="Admin Panel"
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label="Admin Panel"
-              >
-                <Settings size={16} />
-              </a>
-            )}
 
             <div className="notif-wrap">
               <button
