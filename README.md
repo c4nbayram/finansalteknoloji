@@ -3,6 +3,14 @@
 Bu proje, Finansal Teknolojiler dersim için geliştirdiğim bir finansal simülasyon uygulamasıdır.  
 Kullanıcı tarafında portföy ve trade bot işlemleri, yönetici tarafında ise kullanıcı ve işlem takibi yapılabilir.
 
+# Demo Admin Giriş Bilgileri
+Kullanıcı Adı: Admin
+Şifre: Admin.123
+
+# Demo Kullanıcı Giriş Bilgileri
+Kullanıcı Adı: Demo
+Şifre: Demo.123
+
 ## Kısa Özellikler
 
 - Kullanıcı girişi ve rol bazlı ekranlar
