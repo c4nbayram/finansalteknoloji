@@ -125,6 +125,7 @@ import {
   type DbBotWalletTransfer,
 } from './lib/db'
 import { addLog } from './lib/logger'
+import { getAdminUrl } from './lib/adminUrl'
 import { migrateLocalStorageToSupabase } from './lib/migration'
 import {
   appendEquityPoint,
@@ -1895,17 +1896,6 @@ function App() {
               {integrationConfig.marketDataStatusLabel}
             </span>
           </div>
-          {authSession?.role === 'admin' && (
-            <a
-              href="http://admin.localhost:5173"
-              className="sidebar-link"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <Settings size={18} />
-              <span>Admin Panel ?</span>
-            </a>
-          )}
           <button
             type="button"
             className="sidebar-theme"
@@ -1984,6 +1974,19 @@ function App() {
             >
               <RefreshCw size={16} className={isLoadingQuotes ? 'spin' : ''} />
             </button>
+
+            {authSession?.role === 'admin' && (
+              <a
+                href={getAdminUrl()}
+                className="icon-button"
+                title="Admin Panel"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Admin Panel"
+              >
+                <Settings size={16} />
+              </a>
+            )}
 
             <div className="notif-wrap">
               <button

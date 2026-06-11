@@ -5,7 +5,8 @@ import './index.css'
 
 const isAdmin = typeof window !== 'undefined' &&
   (window.location.hostname === 'admin.localhost' ||
-    window.location.hostname.startsWith('admin.localhost'))
+    window.location.hostname.startsWith('admin.localhost') ||
+    window.location.hostname.startsWith('admin-'))
 
 const root = createRoot(document.getElementById('root')!)
 
